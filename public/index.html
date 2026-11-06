@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kaizen HQ</title>
+  <meta name="theme-color" content="#0a0a0a" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%230a0a0a'/><text x='32' y='44' font-family='Georgia,serif' font-size='34' font-weight='700' text-anchor='middle' fill='%23c9a96e'>K</text></svg>" />
+</head>
+<body>
+  <!-- Auth -->
+  <section id="auth" class="auth hidden">
+    <div class="auth-card">
+      <div class="brand-mark">K</div>
+      <h1 id="auth-title">Kaizen HQ</h1>
+      <p class="auth-sub">Where the team gets 1% better, together.</p>
+      <div class="auth-tabs">
+        <button data-tab="login" class="active">Sign in</button>
+        <button data-tab="register">Create account</button>
+      </div>
+      <form id="auth-form" autocomplete="on">
+        <label class="reg-only">Full name<input name="name" autocomplete="name" /></label>
+        <label class="reg-only">Role <span class="muted">(optional)</span><input name="title" placeholder="e.g. REALTOR®, Marketing, Admin" /></label>
+        <label>Email<input name="email" type="email" autocomplete="email" required /></label>
+        <label>Password<input name="password" type="password" autocomplete="current-password" required minlength="8" /></label>
+        <label class="reg-only invite-only hidden">Invite code<input name="invite" /></label>
+        <p id="auth-error" class="error"></p>
+        <button type="submit" class="btn-gold" id="auth-submit">Sign in</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- App -->
+  <div id="app" class="app hidden">
+    <aside class="sidebar" id="sidebar">
+      <header class="ws-header">
+        <div class="ws-name" id="ws-name">Kaizen HQ</div>
+        <button class="icon-btn" id="search-open" title="Search (Ctrl+K)" aria-label="Search">
+          <svg viewBox="0 0 24 24" width="18" height="18"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="M20 20l-4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>
+      </header>
+      <nav class="side-scroll">
+        <div class="side-section">
+          <div class="side-title"><span>Channels</span><button class="icon-btn small" id="channel-add" title="Create or browse channels" aria-label="Add channel">+</button></div>
+          <ul id="channel-list"></ul>
+        </div>
+        <div class="side-section">
+          <div class="side-title"><span>Direct messages</span><button class="icon-btn small" id="dm-add" title="New message" aria-label="New direct message">+</button></div>
+          <ul id="dm-list"></ul>
+        </div>
+      </nav>
+      <footer class="me-bar" id="me-bar" title="Edit your profile">
+        <div class="avatar" id="me-avatar"></div>
+        <div class="me-info"><div id="me-name"></div><div class="me-status" id="me-status"></div></div>
+        <button class="icon-btn" id="logout" title="Sign out" aria-label="Sign out">
+          <svg viewBox="0 0 24 24" width="17" height="17"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </footer>
+    </aside>
+
+    <main class="main">
+      <header class="chan-header">
+        <button class="icon-btn menu-btn" id="menu-btn" aria-label="Open sidebar">☰</button>
+        <div class="chan-title-wrap">
+          <h2 id="chan-title"></h2>
+          <div id="chan-topic" class="chan-topic"></div>
+        </div>
+        <div class="chan-actions">
+          <button class="icon-btn" id="pins-btn" title="Pinned messages" aria-label="Pinned messages">📌</button>
+          <button class="chip" id="members-btn" title="Members"></button>
+        </div>
+      </header>
+      <div class="messages" id="messages"></div>
+      <div class="typing" id="typing"></div>
+      <form class="composer" id="composer">
+        <div class="composer-box">
+          <textarea id="composer-input" rows="1" placeholder="Message"></textarea>
+          <div class="composer-tools">
+            <span class="hint">**bold** _italic_ `code` · @name to mention · Enter to send, Shift+Enter for new line</span>
+            <button type="submit" class="send-btn" aria-label="Send">
+              <svg viewBox="0 0 24 24" width="18" height="18"><path d="M3 20l18-8L3 4v6l12 2-12 2z" fill="currentColor"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="mention-pop hidden" id="mention-pop"></div>
+      </form>
+    </main>
+
+    <aside class="panel hidden" id="panel">
+      <header class="panel-header"><h3 id="panel-title">Thread</h3><button class="icon-btn" id="panel-close" aria-label="Close">✕</button></header>
+      <div class="panel-body" id="panel-body"></div>
+      <form class="composer thread-composer hidden" id="thread-composer">
+        <div class="composer-box">
+          <textarea id="thread-input" rows="1" placeholder="Reply…"></textarea>
+          <div class="composer-tools"><span class="hint"></span><button type="submit" class="send-btn" aria-label="Send reply"><svg viewBox="0 0 24 24" width="18" height="18"><path d="M3 20l18-8L3 4v6l12 2-12 2z" fill="currentColor"/></svg></button></div>
+        </div>
+      </form>
+    </aside>
+  </div>
+
+  <!-- Modal -->
+  <div class="modal-backdrop hidden" id="modal">
+    <div class="modal" role="dialog" aria-modal="true">
+      <header><h3 id="modal-title"></h3><button class="icon-btn" id="modal-close" aria-label="Close">✕</button></header>
+      <div id="modal-body"></div>
+    </div>
+  </div>
+
+  <div class="emoji-pop hidden" id="emoji-pop"></div>
+  <div class="toast hidden" id="toast"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
