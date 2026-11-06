@@ -87,6 +87,9 @@
       if (start) openChannel(start);
       socket.emit('visible', { visible: !document.hidden });
       setupAppBanners();
+      const sw = $('#storage-banner');
+      if (d.storageWarning) { sw.querySelector('.banner-text').textContent = '⚠️ Admin: ' + d.storageWarning; sw.classList.remove('hidden'); }
+      else sw.classList.add('hidden');
     });
     socket.on('presence', ({ userId, online }) => { online ? S.online.add(userId) : S.online.delete(userId); renderSidebar(); });
     socket.on('user:new', (u) => { S.users[u.id] = u; renderSidebar(); });

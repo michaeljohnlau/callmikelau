@@ -38,11 +38,31 @@ function freshDb() {
 }
 
 let db;
-try {
-  db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-} catch {
+if (fs.existsSync(DB_FILE)) {
+  try {
+    db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+  } catch (e) {
+    // Never silently overwrite saved data: keep the unreadable file aside so it can be recovered.
+    const backup = DB_FILE.replace(/\.json$/, `.unreadable-${Date.now()}.json`);
+    fs.renameSync(DB_FILE, backup);
+    console.error(`Could not read ${DB_FILE} (${e.message}). Saved it as ${backup} and started fresh.`);
+    db = freshDb();
+  }
+} else {
   db = freshDb();
 }
+
+// Storage check: on Render, data only survives updates and restarts when it lives on a persistent disk.
+const storage = (() => {
+  const onRender = !!process.env.RENDER;
+  const persistent = !onRender || (!!process.env.DATA_DIR && DATA_DIR.startsWith('/var/data'));
+  return {
+    persistent,
+    path: DATA_DIR,
+    warning: persistent ? null : 'Messages and accounts are NOT being saved permanently. In Render, add a Disk mounted at /var/data and set DATA_DIR=/var/data, otherwise everything is erased on every update or restart.',
+  };
+})();
+if (storage.warning) console.warn('WARNING: ' + storage.warning);
 db.botTokens = db.botTokens || {};
 
 // ---------- Push notifications (VAPID keys are generated once and saved) ----------
@@ -273,7 +293,7 @@ const app = express();
 app.use(express.json({ limit: '200kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-app.get('/healthz', (req, res) => res.send('ok'));
+app.get('/healthz', (req, res) => res.json({ ok: true, storage: storage.persistent ? 'persistent' : 'NOT persistent: data is erased on every update/restart', users: Object.values(db.users).filter((u) => !u.isBot).length, messages: db.messages.length }));
 
 app.get('/api/config', (req, res) => {
   res.json({ workspace: WORKSPACE_NAME, inviteRequired: !!INVITE_CODE, hasUsers: Object.values(db.users).some((u) => !u.isBot) });
@@ -380,6 +400,7 @@ io.on('connection', (socket) => {
   socket.emit('init', {
     workspace: WORKSPACE_NAME,
     me: publicUser(user),
+    storageWarning: user.isAdmin ? storage.warning : null,
     prefs: prefsOf(user),
     users: Object.values(db.users).filter((u) => !u.disabled).map(publicUser),
     online: [...online.keys()],
@@ -609,5 +630,12 @@ io.on('connection', (socket) => {
     } else online.set(user.id, n);
   });
 });
+
+function flushAndExit() {
+  try { if (saveTimer) { clearTimeout(saveTimer); fs.writeFileSync(DB_FILE, JSON.stringify(db)); } } catch {}
+  process.exit(0);
+}
+process.on('SIGTERM', flushAndExit);
+process.on('SIGINT', flushAndExit);
 
 server.listen(PORT, () => console.log(`${WORKSPACE_NAME} running on http://localhost:${PORT}`));

@@ -262,6 +262,7 @@ textarea:disabled { cursor: not-allowed; }
 
 /* ---------- Install / notification banners ---------- */
 .main .app-banner { margin: 10px 20px 0; }
+.app-banner.warn { background: #3a1d17; border-color: #b4483c; color: #f6ddd7; font-weight: 500; }
 .app-banner { margin: 10px 10px 0; padding: 12px; border-radius: 10px; background: #1a1712; border: 1px solid #3a3122; color: #e9e2d4; font-size: 13px; line-height: 1.4; }
 .banner-row { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
 .banner-btn { background: var(--gold); color: var(--charcoal); border: 0; border-radius: 7px; padding: 6px 12px; font-weight: 600; font-size: 13px; }
