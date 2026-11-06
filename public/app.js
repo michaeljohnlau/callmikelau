@@ -22,6 +22,7 @@
     const cfg = await fetch('/api/config').then((r) => r.json()).catch(() => ({}));
     document.title = cfg.workspace || 'Kaizen HQ';
     $('#auth-title').textContent = cfg.workspace || 'Kaizen HQ';
+    if (cfg.branding?.logo) $('#auth-mark').innerHTML = `<img src="${esc(cfg.branding.logo)}" alt="">`;
     if (cfg.inviteRequired) document.querySelectorAll('.invite-only').forEach((e) => e.classList.remove('hidden'));
     setMode(cfg.hasUsers ? 'login' : 'register');
     if (store.get(TOKEN_KEY)) connect(store.get(TOKEN_KEY));
@@ -71,11 +72,14 @@
       S.me = d.me;
       S.prefs = d.prefs || S.prefs;
       S.dash = d.dashboard || null;
+      S.templates = d.templates || [];
+      S.branding = d.branding || null;
       S.users = Object.fromEntries(d.users.map((u) => [u.id, u]));
       S.online = new Set(d.online);
       S.channels = Object.fromEntries(d.channels.map((c) => [c.id, c]));
       S.browse = Object.fromEntries(d.browse.map((c) => [c.id, c]));
       $('#ws-name').textContent = d.workspace;
+      renderBranding();
       $('#auth').classList.add('hidden');
       $('#app').classList.remove('hidden');
       renderMe();
@@ -106,6 +110,13 @@
     });
     socket.on('user:update', (u) => { S.users[u.id] = u; if (u.id === S.me.id) { S.me = u; renderMe(); } renderSidebar(); renderMessages(); renderThread(); });
     socket.on('dashboard', (d) => { S.dash = d; renderDashboard(); });
+    socket.on('templates', (t) => { S.templates = t; renderChecklist(); });
+    socket.on('branding', (b) => { S.branding = b; renderBranding(); });
+    socket.on('channel:checklist', ({ channelId, checklist }) => {
+      if (!S.channels[channelId]) return;
+      S.channels[channelId].checklist = checklist;
+      if (channelId === S.current) { renderChecklist(); renderHeader(); }
+    });
     socket.on('message:new', onNewMessage);
     socket.on('message:update', onUpdateMessage);
     socket.on('typing', onTyping);
@@ -127,6 +138,7 @@
   function avatar(u, cls = '') {
     if (!u) return `<div class="avatar ${cls}" style="background:#ccc">?</div>`;
     if (u.isBot) return `<div class="avatar bot ${cls}">✦</div>`;
+    if (u.avatar) return `<img class="avatar ${cls}" src="${esc(u.avatar)}" alt="" loading="lazy" decoding="async">`;
     return `<div class="avatar ${cls}" style="background:${u.color}">${esc(initials(u.name))}</div>`;
   }
   const fmtTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -238,7 +250,9 @@
     S.socket.emit('read', { channelId: id });
     $('#sidebar').classList.remove('open');
     renderSidebar();
+    clOpen = null;
     renderHeader();
+    renderChecklist();
     renderTyping();
     const c = S.channels[id];
     if (c.parentId) { S.collapsed.delete(c.parentId); }
@@ -275,6 +289,10 @@
     const other = c.isDM && S.users[c.members.find((x) => x !== S.me.id)];
     $('#chan-topic').textContent = c.isDM ? (other ? [other.title, other.status].filter(Boolean).join(' · ') : '') : (c.topic || 'Add a topic');
     $('#members-btn').textContent = `👥 ${c.members.length}`;
+    const cl = c.checklist || [];
+    $('#cl-btn').classList.toggle('hidden', c.isDM);
+    $('#cl-btn').classList.toggle('active', clVisible());
+    $('#cl-btn').innerHTML = cl.length ? `☑ ${cl.filter((t) => t.doneBy).length}/${cl.length}` : '☑';
     const pinCount = (S.messages[c.id] || []).filter((m) => m.pinned && !m.deleted).length;
     $('#pins-btn').innerHTML = pinCount ? `📌<span class="pin-count">${pinCount}</span>` : '📌';
   }
@@ -568,7 +586,7 @@
 
   // ---------- Settings (notifications, profile, AI assistants) ----------
   function openSettings(tab = 'notifications') {
-    const tabs = [['notifications', 'Notifications'], ['profile', 'Profile'], ...(S.me.isAdmin ? [['integrations', 'Integrations'], ['ai', 'AI & API']] : [])];
+    const tabs = [['notifications', 'Notifications'], ['profile', 'Profile'], ...(S.me.isAdmin ? [['workspace', 'Workspace'], ['integrations', 'Integrations'], ['ai', 'AI & API']] : [])];
     modal('Settings', `<div class="tabs">${tabs.map(([k, t]) => `<button data-tab="${k}" class="${k === tab ? 'active' : ''}">${t}</button>`).join('')}</div><div id="settings-body"></div>`);
     $('.tabs', $('#modal-body')).onclick = (e) => { const b = e.target.closest('[data-tab]'); if (b) openSettings(b.dataset.tab); };
     const body = $('#settings-body');
@@ -576,6 +594,7 @@
     if (tab === 'profile') renderProfileSettings(body);
     if (tab === 'ai') renderAISettings(body);
     if (tab === 'integrations') renderIntegrations(body);
+    if (tab === 'workspace') renderWorkspaceSettings(body);
   }
 
   function renderIntegrations(body) {
@@ -719,10 +738,24 @@
 
   function renderProfileSettings(body) {
     body.innerHTML = `
+      <div class="photo-row">${avatar(S.me, 'xl')}<div>
+        <label class="btn photo-btn">📷 ${S.me.avatar ? 'Change photo' : 'Add a photo'}<input type="file" id="p-photo" accept="image/*" hidden></label>
+        ${S.me.avatar ? '<button class="btn danger" id="p-photo-rm">Remove</button>' : ''}
+        <div class="sub" style="margin-top:6px">Resized to a small thumbnail on your device before uploading, so the app stays fast.</div></div></div>
       <div class="field">Full name<input id="p-name" value="${esc(S.me.name)}" maxlength="60"></div>
       <div class="field">Role<input id="p-title" value="${esc(S.me.title || '')}" maxlength="60" placeholder="e.g. REALTOR®, Team Lead"></div>
       <div class="field">Status<input id="p-status" value="${esc(S.me.status || '')}" maxlength="80" placeholder="e.g. 🏡 At a listing appointment"></div>
       <div class="modal-actions"><button class="btn-gold" id="p-save">Save</button></div>`;
+    $('#p-photo').onchange = async (e) => {
+      const f = e.target.files[0];
+      if (!f) return;
+      try {
+        const dataUrl = await resizeImage(f, { size: 192, square: true, type: 'image/jpeg' });
+        const r = await upload({ kind: 'avatar', dataUrl });
+        S.me.avatar = r.avatar; renderMe(); renderProfileSettings(body); toast('Photo updated');
+      } catch (err) { toast(err.message); }
+    };
+    if ($('#p-photo-rm')) $('#p-photo-rm').onclick = async () => { await upload({ kind: 'avatar', remove: true }); S.me.avatar = ''; renderMe(); renderProfileSettings(body); };
     $('#p-save').onclick = () => { S.socket.emit('profile:update', { name: $('#p-name').value, title: $('#p-title').value, status: $('#p-status').value }); closeModal(); toast('Profile updated'); };
   }
 
@@ -862,6 +895,7 @@
       S.thread = r.parent;
       S.threadReplies = r.replies;
       $('#panel').classList.remove('hidden');
+      document.body.classList.add('thread-open');
       $('#thread-composer').classList.remove('hidden');
       const c = S.channels[r.parent.channelId];
       $('#panel-title').innerHTML = `Thread <span class="muted">${c.isDM ? esc(channelLabel(c)) : '#' + esc(fullLabel(c))}</span>`;
@@ -880,7 +914,7 @@
     body.innerHTML = html;
     if (scroll) body.scrollTop = body.scrollHeight;
   }
-  $('#panel-close').addEventListener('click', () => { $('#panel').classList.add('hidden'); S.thread = null; });
+  $('#panel-close').addEventListener('click', () => { $('#panel').classList.add('hidden'); S.thread = null; document.body.classList.remove('thread-open'); });
 
   // ---------- Emoji picker ----------
   function emojiPicker(anchor, cb) {
@@ -921,19 +955,29 @@
       </div>
       <div class="field"><span id="name-label">${parentId ? 'Address or name' : 'Channel name'}</span><input id="new-chan" type="text" autocomplete="off" autocorrect="off" autocapitalize="words" enterkeyhint="done" data-1p-ignore placeholder="${parentId ? 'e.g. 24 Juniper Crescent' : 'e.g. open-houses'}" maxlength="80"></div>
       <div class="field"><input id="new-topic" type="text" autocomplete="off" enterkeyhint="done" placeholder="What's it for? (optional)" maxlength="200"></div>
+      <div class="field">Checklist
+        <select id="new-template"><option value="">No checklist</option>${(S.templates || []).map((t) => `<option value="${esc(t.id)}">☑ ${esc(t.name)}</option>`).join('')}</select>
+      </div>
       <p class="sub" id="sub-hint" style="${parentId ? '' : 'display:none'}">Everyone in the main channel is added automatically. Archive it when the deal closes.</p>
       <p class="error" id="chan-err"></p>
       <div class="modal-actions"><button class="btn-gold" id="create-chan">Create</button></div>
       ${browse.length ? `<h4 class="modal-sub">Browse channels</h4>${browse.map((c) => `<div class="list-row" data-join="${c.id}"><div class="grow"><strong>${c.parentId ? '⌂' : '#'} ${esc(fullLabel(c))}</strong><div class="sub">${esc(c.topic || '')}${c.topic ? ' · ' : ''}${c.memberCount} member${c.memberCount === 1 ? '' : 's'}</div></div><button class="btn">Join</button></div>`).join('')}` : ''}
       ${archived.length ? `<h4 class="modal-sub">Archived</h4>${archived.map((c) => `<div class="list-row" data-arch="${c.id}"><div class="grow"><strong>🗄 ${esc(fullLabel(c))}</strong><div class="sub">${esc(c.topic || '')}</div></div><button class="btn">${S.channels[c.id] ? 'Open' : 'Join'}</button></div>`).join('')}` : ''}`);
     $('#new-chan').focus();
+    const pickTemplate = () => {
+      const parent = S.channels[$('#new-parent').value];
+      const want = parent?.name === 'listings' ? 'listing' : /open.?house/i.test(parent?.name || '') ? 'openhouse' : '';
+      $('#new-template').value = (S.templates || []).some((t) => t.id === want) ? want : '';
+    };
+    pickTemplate();
     $('#new-parent').onchange = (e) => {
+      pickTemplate();
       const sub = !!e.target.value;
       $('#name-label').textContent = sub ? 'Address or name' : 'Channel name';
       $('#new-chan').placeholder = sub ? 'e.g. 24 Juniper Crescent' : 'e.g. open-houses';
       $('#sub-hint').style.display = sub ? '' : 'none';
     };
-    const create = () => S.socket.emit('channel:create', { name: $('#new-chan').value, topic: $('#new-topic').value, parentId: $('#new-parent').value || null }, (r) => {
+    const create = () => S.socket.emit('channel:create', { name: $('#new-chan').value, topic: $('#new-topic').value, parentId: $('#new-parent').value || null, templateId: $('#new-template').value }, (r) => {
       if (r.error) return ($('#chan-err').textContent = r.error);
       closeModal();
       setTimeout(() => openChannel(r.id), 50);
@@ -969,6 +1013,196 @@
 
   $('#me-bar').addEventListener('click', () => openSettings('profile'));
   $('#settings-open').addEventListener('click', () => openSettings('notifications'));
+
+  // ---------- Branding & uploads ----------
+  function renderBranding() {
+    const b = S.branding;
+    if (!b) return;
+    const img = $('#ws-logo');
+    if (b.logo) { img.src = b.logo; img.classList.remove('hidden'); } else img.classList.add('hidden');
+    $('#ws-name').textContent = b.name;
+    $('#ws-name').classList.toggle('hidden', !!b.logo && !b.showName);
+    document.querySelector('.ws-brand').classList.toggle('has-logo', !!b.logo);
+  }
+
+  // Shrink a photo in the browser before upload (keeps files around 10–60 KB).
+  function resizeImage(file, { size = 192, square = false, maxW = 600, maxH = 200, type = 'image/jpeg' } = {}) {
+    return new Promise((resolve, reject) => {
+      if (!/^image\//.test(file.type)) return reject(new Error('Please choose an image.'));
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        let sx = 0, sy = 0, sw = img.width, sh = img.height, w, h;
+        if (square) { const s = Math.min(sw, sh); sx = (sw - s) / 2; sy = (sh - s) / 2; sw = sh = s; w = h = size; }
+        else { const k = Math.min(1, maxW / sw, maxH / sh); w = Math.round(sw * k); h = Math.round(sh * k); }
+        const cv = document.createElement('canvas');
+        cv.width = w; cv.height = h;
+        const ctx = cv.getContext('2d');
+        if (type === 'image/jpeg') { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h); }
+        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, w, h);
+        URL.revokeObjectURL(url);
+        resolve(cv.toDataURL(type, 0.85));
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('That image could not be read.')); };
+      img.src = url;
+    });
+  }
+  async function upload(body) {
+    const res = await fetch('/api/upload', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + store.get(TOKEN_KEY) }, body: JSON.stringify(body) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Upload failed.');
+    return data;
+  }
+
+  function renderWorkspaceSettings(body) {
+    body.innerHTML = '<p class="muted">Loading…</p>';
+    S.socket.emit('settings:get', {}, (st) => {
+      if (st.error) { body.innerHTML = `<p class="error">${esc(st.error)}</p>`; return; }
+      const b = S.branding || {};
+      body.innerHTML = `
+        <div class="set-block">
+          <div class="set-title">Logo</div>
+          <div class="logo-preview">${b.logo ? `<img src="${esc(b.logo)}" alt="">` : '<span class="muted">No logo yet. The workspace name is shown instead.</span>'}</div>
+          <div class="chip-row" style="margin-top:8px">
+            <label class="btn photo-btn">⬆️ ${b.logo ? 'Replace logo' : 'Upload logo'}<input type="file" id="ws-logo-file" accept="image/png,image/jpeg,image/webp" hidden></label>
+            ${b.logo ? '<button class="btn danger" id="ws-logo-rm">Remove</button>' : ''}
+          </div>
+          <label class="check-row"><input type="checkbox" id="ws-show-name" ${st.showName ? 'checked' : ''}> Show the workspace name next to the logo</label>
+          <div class="sub">Tip: a transparent PNG with light or gold artwork looks best on the dark sidebar.</div>
+        </div>
+        <div class="set-block">
+          <div class="field">Workspace name<input id="ws-name-input" type="text" autocomplete="off" maxlength="40" value="${esc(st.workspaceName)}"></div>
+        </div>
+        <div class="set-block">
+          <div class="set-title">Sign-up code</div>
+          <div class="sub" style="margin-bottom:8px">New teammates need this code to create an account. Not case-sensitive.${st.envCode ? ' (Currently set on the server; saving here replaces it.)' : ''}</div>
+          <div class="copy-row"><input id="ws-code" type="text" autocomplete="off" autocapitalize="off" maxlength="40" value="${esc(st.inviteCode)}" placeholder="e.g. a code only your team knows"></div>
+          ${!st.inviteCode ? '<div class="error" style="margin-top:4px">⚠️ No code set: anyone with the link can sign up.</div>' : ''}
+        </div>
+        <div class="modal-actions"><button class="btn-gold" id="ws-save">Save</button></div>
+        <div class="set-block">
+          <div class="set-title">Checklists</div>
+          <div class="sub" style="margin-bottom:8px">Used for listing sub-channels, open houses and any channel. Start a line with <code>#</code> for a section heading; every other line is a task.</div>
+          <div id="tpl-list"></div>
+          <div class="chip-row" style="margin-top:8px"><button class="btn" id="tpl-new">＋ New checklist</button><button class="btn-gold" id="tpl-save">Save checklists</button></div>
+        </div>`;
+      $('#ws-logo-file').onchange = async (e) => {
+        const f = e.target.files[0];
+        if (!f) return;
+        try {
+          const dataUrl = await resizeImage(f, { maxW: 600, maxH: 200, type: 'image/png' });
+          const r = await upload({ kind: 'logo', dataUrl });
+          S.branding = r.branding; renderBranding(); renderWorkspaceSettings(body); toast('Logo updated');
+        } catch (err) { toast(err.message); }
+      };
+      if ($('#ws-logo-rm')) $('#ws-logo-rm').onclick = async () => { const r = await upload({ kind: 'logo', remove: true }); S.branding = r.branding; renderBranding(); renderWorkspaceSettings(body); };
+      $('#ws-save').onclick = () => S.socket.emit('settings:update', { inviteCode: $('#ws-code').value, workspaceName: $('#ws-name-input').value, showName: $('#ws-show-name').checked }, (r) => r.error ? toast(r.error) : toast('Workspace saved'));
+      // Checklist templates
+      S.socket.emit('templates:get', {}, ({ templates }) => {
+        const draw = (list) => {
+          $('#tpl-list').innerHTML = list.map((t, i) => `<div class="pb" data-i="${i}">
+            <div class="pb-head"><input class="tpl-name" value="${esc(t.name)}" maxlength="40" data-id="${esc(t.id || '')}"><button class="btn danger small-btn" data-del="${i}">Delete</button></div>
+            <textarea class="tpl-text" rows="8">${esc(t.text || '')}</textarea></div>`).join('');
+        };
+        let list = templates;
+        draw(list);
+        const read = () => [...body.querySelectorAll('#tpl-list .pb')].map((el) => ({ id: el.querySelector('.tpl-name').dataset.id, name: el.querySelector('.tpl-name').value, text: el.querySelector('.tpl-text').value }));
+        $('#tpl-new').onclick = () => { list = [...read(), { id: '', name: 'New checklist', text: '# Section\nFirst task' }]; draw(list); };
+        $('#tpl-list').onclick = (e) => { const d = e.target.closest('[data-del]'); if (d && confirm('Delete this checklist template? Channels that already use it keep their tasks.')) { list = read().filter((_, i) => i !== +d.dataset.del); draw(list); } };
+        $('#tpl-save').onclick = () => S.socket.emit('templates:save', { templates: read() }, (r) => r.error ? toast(r.error) : toast('Checklists saved'));
+      });
+    });
+  }
+
+  // ---------- Channel checklist panel ----------
+  const isWide = () => window.matchMedia('(min-width: 1000px)').matches;
+  const clPref = () => store.get('kaizenhq_cl') !== 'hidden';
+  let clOpen = null; // explicit open/close for the current channel; null = automatic
+  function clVisible() {
+    const c = S.channels[S.current];
+    if (!c || c.isDM) return false;
+    if (clOpen !== null) return clOpen;
+    return isWide() && !!c.checklist?.length && clPref();
+  }
+  function renderChecklist() {
+    const c = S.channels[S.current];
+    const panel = $('#checklist');
+    const show = clVisible();
+    panel.classList.toggle('hidden', !show);
+    document.body.classList.toggle('cl-open', show);
+    if (!show || !c) return;
+    const list = c.checklist || [];
+    const done = list.filter((t) => t.doneBy).length;
+    $('#cl-title').textContent = c.parentId ? `☑ ${c.label || c.name}` : `☑ #${c.name}`;
+    $('#cl-progress').innerHTML = list.length ? `<span>${done} of ${list.length} done</span>${bar(pct(done, list.length))}` : '';
+    const who = (id) => (id === S.me.id ? 'You' : S.users[id]?.name.split(' ')[0] || 'Someone');
+    const day = (ts) => new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' });
+    if (!list.length) {
+      $('#cl-body').innerHTML = `<div class="cl-empty"><p>No checklist for this channel yet.</p>
+        ${(S.templates || []).map((t) => `<button class="btn cl-tpl" data-apply="${esc(t.id)}">＋ ${esc(t.name)} checklist</button>`).join('')}
+        <p class="sub">Or type your own tasks below.</p></div>`;
+      return;
+    }
+    const sections = [];
+    for (const t of list) {
+      let s = sections.find((x) => x.name === (t.section || ''));
+      if (!s) sections.push((s = { name: t.section || '', items: [] }));
+      s.items.push(t);
+    }
+    const canRemove = (t) => t.addedBy === S.me.id || c.createdBy === S.me.id || S.me.isAdmin;
+    $('#cl-body').innerHTML = sections.map((s) => `
+      <div class="cl-section">
+        ${s.name ? `<div class="cl-sec-head"><span>${esc(s.name)}</span><span>${s.items.filter((t) => t.doneBy).length}/${s.items.length}</span></div>` : ''}
+        ${s.items.map((t) => `<div class="cl-item${t.doneBy ? ' done' : ''}">
+          <button class="cl-check" data-toggle-item="${t.id}" aria-label="${t.doneBy ? 'Mark not done' : 'Mark done'}">${t.doneBy ? '✓' : ''}</button>
+          <div class="cl-text"><span>${esc(t.label)}</span>${t.doneBy ? `<small>${esc(who(t.doneBy))} · ${day(t.doneAt)}</small>` : ''}</div>
+          ${canRemove(t) ? `<button class="cl-rm" data-rm-item="${t.id}" aria-label="Remove task" title="Remove task">✕</button>` : ''}
+        </div>`).join('')}
+      </div>`).join('') + `
+      <div class="cl-more">
+        <select id="cl-apply"><option value="">＋ Add tasks from a checklist…</option>${(S.templates || []).map((t) => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join('')}</select>
+        ${c.createdBy === S.me.id || S.me.isAdmin ? '<button class="cl-link" id="cl-clear">Remove checklist</button>' : ''}
+      </div>`;
+  }
+  $('#cl-body').addEventListener('click', (e) => {
+    const c = S.channels[S.current];
+    const tg = e.target.closest('[data-toggle-item]');
+    if (tg) {
+      // Update instantly, then confirm with the server.
+      const it = c.checklist.find((x) => x.id === tg.dataset.toggleItem);
+      if (it) { it.doneBy = it.doneBy ? null : S.me.id; it.doneAt = Date.now(); renderChecklist(); renderHeader(); if (it.doneBy) playSound('pop', 0.5); }
+      return S.socket.emit('checklist:toggle', { channelId: c.id, itemId: tg.dataset.toggleItem }, (r) => r?.error && toast(r.error));
+    }
+    const rm = e.target.closest('[data-rm-item]');
+    if (rm) return S.socket.emit('checklist:remove', { channelId: c.id, itemId: rm.dataset.rmItem }, (r) => r?.error && toast(r.error));
+    const ap = e.target.closest('[data-apply]');
+    if (ap) return S.socket.emit('checklist:apply', { channelId: c.id, templateId: ap.dataset.apply }, (r) => r?.error && toast(r.error));
+    if (e.target.id === 'cl-clear' && confirm('Remove this whole checklist from the channel?')) S.socket.emit('checklist:clear', { channelId: c.id }, (r) => r?.error && toast(r.error));
+  });
+  $('#cl-body').addEventListener('change', (e) => {
+    if (e.target.id !== 'cl-apply' || !e.target.value) return;
+    const name = (S.templates || []).find((t) => t.id === e.target.value)?.name;
+    if (confirm(`Add the "${name}" tasks to this checklist?`)) S.socket.emit('checklist:apply', { channelId: S.current, templateId: e.target.value }, (r) => r?.error ? toast(r.error) : toast(`${name} tasks added`));
+    e.target.value = '';
+  });
+  $('#cl-add').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const v = $('#cl-input').value.trim();
+    if (!v) return;
+    S.socket.emit('checklist:add', { channelId: S.current, label: v }, (r) => { if (r?.error) toast(r.error); else $('#cl-input').value = ''; });
+  });
+  $('#cl-btn').addEventListener('click', () => {
+    clOpen = !clVisible();
+    if (isWide()) store.set('kaizenhq_cl', clOpen ? 'shown' : 'hidden');
+    renderChecklist(); renderHeader();
+    if (clOpen && !S.channels[S.current]?.checklist?.length) $('#cl-input').focus();
+  });
+  $('#cl-close').addEventListener('click', () => {
+    clOpen = false;
+    if (isWide()) store.set('kaizenhq_cl', 'hidden');
+    renderChecklist(); renderHeader();
+  });
+  window.addEventListener('resize', () => { if (S.me) { renderChecklist(); renderHeader(); } });
 
   // ---------- Dashboard: forecast, goals, urgent, hot leads ----------
   const money = (n) => {

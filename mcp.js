@@ -225,6 +225,43 @@ function mountMcp(app, core) {
       }
     });
 
+    server.registerTool('get_checklist', {
+      title: 'Get a channel checklist',
+      description: 'Get the task checklist of a channel, e.g. the new-listing checklist of "listings/24-juniper-crescent", with what is done and by whom.',
+      inputSchema: { channel: z.string() },
+      annotations: { readOnlyHint: true },
+    }, async ({ channel }) => {
+      const c = resolveChannel(bot, channel);
+      if (!c) return error(`Channel "${channel}" not found.`);
+      const list = (c.checklist || []).map((t) => ({ item_id: t.id, section: t.section, task: t.label, done: !!t.doneBy, done_by: t.doneBy ? nameOf(t.doneBy) : undefined }));
+      return text({ channel: core.displayName(c), done: list.filter((t) => t.done).length, total: list.length, items: list });
+    });
+
+    server.registerTool('update_checklist', {
+      title: 'Tick off or add a checklist task',
+      description: 'Mark a checklist task done or not done, or add a new task to a channel checklist.',
+      inputSchema: {
+        channel: z.string(),
+        item_id: z.string().optional().describe('The task to tick or untick'),
+        done: z.boolean().optional(),
+        add_task: z.string().max(160).optional().describe('Text of a new task to add'),
+      },
+    }, async ({ channel, item_id, done, add_task }) => {
+      const c = resolveChannel(bot, channel);
+      if (!c || c.isDM) return error(`Channel "${channel}" not found.`);
+      if (add_task) {
+        c.checklist = c.checklist || [];
+        c.checklist.push({ id: core.uid(), label: add_task.trim(), section: 'Our tasks', doneBy: null, doneAt: null, addedBy: bot.id, custom: true });
+      }
+      if (item_id) {
+        const t = (c.checklist || []).find((x) => x.id === item_id);
+        if (!t) return error('Task not found.');
+        if (done === false) { t.doneBy = null; t.doneAt = null; } else { t.doneBy = bot.id; t.doneAt = Date.now(); }
+      }
+      core.checklistChanged(c);
+      return text({ ok: true });
+    });
+
     server.registerTool('get_dashboard', {
       title: 'Get the team dashboard',
       description: 'The team forecast vs goal for the year (GCI and deals, per agent), urgent items, and hot leads with Follow Up Boss links.',

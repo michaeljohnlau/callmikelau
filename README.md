@@ -11,6 +11,11 @@ Private, real-time team chat for **Kaizen Real Estate Team**. It gives the team 
   - **🎯 Your goal:** each agent sets and edits their own goal, closed and pending numbers. Admins can edit anyone's.
   - **⚠️ Urgent:** lead steps nobody has claimed, steps claimed over 24h ago and still open, and items anyone can add (e.g. "Offer deadline 5pm").
   - **🔥 Hot leads:** a scrolling ticker. Each name opens the lead in Follow Up Boss. It pulls leads whose Follow Up Boss stage or tag says "Hot" (refreshed every 5 minutes), plus any lead a teammate marks 🔥 in the app.
+- **Checklists:** a panel on the right (about 30% of the screen) for any channel. On phones, tap **☑ 3/30** in the channel header to open it.
+  - New sub-channels under `#listings` get the **New listing** checklist automatically. Add **Open house** tasks, or type your own.
+  - Each tick shows who did it and when. Admins edit the templates under **Settings → Workspace**.
+- **Branding & photos:** admins upload the workspace logo. Everyone can add a profile photo, which is shrunk to about 3–10 KB on the device before upload.
+- **Sign-up code:** admins set it under **Settings → Workspace** (not case-sensitive). It overrides the `INVITE_CODE` environment variable.
 - **Notification controls:** set each channel to *All messages*, *Mentions only* or *Muted* (sub-channels follow their main channel unless changed). Choose from 6 sounds and pause notifications for 30 min, 1 hour, 2 hours or until tomorrow at 8am. Find these under the 🔔 in the sidebar or the channel header.
 - **AI assistants (MCP):** connect Grok or any MCP-capable assistant. See below.
 - **Direct messages:** one-on-one chats, plus "notes to self."

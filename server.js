@@ -67,6 +67,56 @@ if (storage.warning) console.warn('WARNING: ' + storage.warning);
 db.botTokens = db.botTokens || {};
 db.goals = db.goals || {};   // { [year]: { [userId]: { goalGci, goalDeals, closedGci, closedDeals, pendingGci, pendingDeals } } }
 db.urgent = db.urgent || []; // custom urgent items added by the team
+db.settings = db.settings || {}; // admin settings: inviteCode, workspaceName, logo, showName
+
+// Checklist templates (editable by admins). Lines starting with "#" are section headings.
+const DEFAULT_TEMPLATES = {
+  listing: { id: 'listing', name: 'New listing', text: [
+    '# Before listing',
+    'Listing agreement signed',
+    'FINTRAC ID verification completed',
+    'CMA & pricing strategy reviewed with seller',
+    'Pre-listing repairs & staging plan agreed',
+    'Room measurements & floor plan',
+    'Photos, video & drone booked',
+    '# Launch',
+    'Listing remarks & feature sheet written',
+    'MLS listing submitted & double-checked',
+    'Lockbox, sign & showing system set up',
+    'Instagram Reel, post & stories',
+    'Email to database & agent network',
+    'First open house scheduled',
+    '# On the market',
+    'Weekly seller report sent',
+    'Showing feedback collected & shared',
+    '# Offer to close',
+    'Offers reviewed with seller',
+    'Conditions tracked until waived',
+    'Sold sign & "Just Sold" marketing',
+    'Closing gift & review request',
+  ].join('\n') },
+  openhouse: { id: 'openhouse', name: 'Open house', text: [
+    '# Open house: before',
+    'Open house added to MLS & showing system',
+    'Social post & story announcing it',
+    'Invite neighbours (door knock or flyers)',
+    'Directional signs ready',
+    'QR sign-in sheet & feature sheets printed',
+    'Home prepped: lights on, music, fresh scent',
+    '# Open house: on the day',
+    'Greet every visitor & collect contact info',
+    'Note buyer feedback',
+    '# Open house: after',
+    'Add every visitor to Follow Up Boss',
+    'Follow up with every visitor within 24 hours',
+    'Send the seller an open house recap',
+  ].join('\n') },
+};
+db.checklistTemplates = db.checklistTemplates || JSON.parse(JSON.stringify(DEFAULT_TEMPLATES));
+
+const inviteCode = () => (db.settings.inviteCode || INVITE_CODE || '').trim();
+const workspaceName = () => db.settings.workspaceName || WORKSPACE_NAME;
+const branding = () => ({ name: workspaceName(), logo: db.settings.logo ? '/uploads/' + db.settings.logo : '', showName: db.settings.showName !== false });
 
 // ---------- Push notifications (VAPID keys are generated once and saved) ----------
 const VAPID_FILE = path.join(DATA_DIR, 'vapid.json');
@@ -113,7 +163,7 @@ const LEVELS = ['all', 'mentions', 'mute'];
 const SOUNDS = ['chime', 'ding', 'pop', 'marimba', 'soft', 'none'];
 
 function publicUser(u) {
-  return { id: u.id, name: u.name, email: u.isBot ? '' : u.email, title: u.title || '', color: u.color, isAdmin: !!u.isAdmin, isBot: !!u.isBot, integration: u.integration || null, status: u.status || '' };
+  return { id: u.id, avatar: u.avatar ? '/uploads/' + u.avatar : '', name: u.name, email: u.isBot ? '' : u.email, title: u.title || '', color: u.color, isAdmin: !!u.isAdmin, isBot: !!u.isBot, integration: u.integration || null, status: u.status || '' };
 }
 
 function prefsOf(u) {
@@ -163,6 +213,7 @@ function channelView(c, user) {
   return {
     id: c.id, name: c.name, label: c.label || '', topic: c.topic, isDM: c.isDM, members: c.members, createdBy: c.createdBy,
     parentId: c.parentId || null, archived: !!c.archived, isDefault: !!c.isDefault, unread, mentions,
+    checklist: c.checklist || null,
   };
 }
 const browseView = (c) => ({ id: c.id, name: c.name, label: c.label || '', topic: c.topic, parentId: c.parentId || null, archived: !!c.archived, memberCount: c.members.length });
@@ -384,7 +435,34 @@ function dashboardChanged() {
   dashTimer = setTimeout(() => { dashTimer = null; io.emit('dashboard', dashboard()); }, 250);
 }
 
-function createChannel(user, { name, topic, parentId }) {
+function parseTemplate(t) {
+  let section = '';
+  const items = [];
+  for (const raw of String(t?.text || '').split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (line.startsWith('#')) { section = line.replace(/^#+\s*/, '').slice(0, 60); continue; }
+    items.push({ section, label: line.replace(/^[-*•]\s*/, '').slice(0, 160) });
+  }
+  return items.slice(0, 100);
+}
+
+function applyTemplate(c, templateId, user) {
+  const t = db.checklistTemplates[templateId];
+  if (!t) throw new Error('Checklist template not found.');
+  c.checklist = c.checklist || [];
+  for (const it of parseTemplate(t)) {
+    c.checklist.push({ id: uid(), label: it.label, section: it.section, doneBy: null, doneAt: null, addedBy: user?.id || null, custom: false });
+  }
+  c.checklist = c.checklist.slice(0, 200);
+}
+
+function checklistChanged(c) {
+  save();
+  emitToChannel(c, 'channel:checklist', { channelId: c.id, checklist: c.checklist || null });
+}
+
+function createChannel(user, { name, topic, parentId, templateId }) {
   const parent = parentId ? db.channels[parentId] : null;
   if (parentId && (!parent || parent.isDM || parent.parentId)) throw new Error('Sub-channels can only be added under a main channel.');
   if (parent && !canSee(user, parent)) throw new Error('Join the parent channel first.');
@@ -399,6 +477,9 @@ function createChannel(user, { name, topic, parentId }) {
     id, name: slug, label: parent && label !== slug ? label : '', topic: String(topic || '').slice(0, 200), isDM: false,
     members, createdBy: user.id, createdAt: Date.now(), parentId: parent ? parent.id : null,
   };
+  // Sub-channels under #listings get the "New listing" checklist unless told otherwise.
+  if (templateId === undefined && parent?.name === 'listings' && db.checklistTemplates.listing) templateId = 'listing';
+  if (templateId && db.checklistTemplates[templateId]) applyTemplate(c, templateId, user);
   db.channels[id] = c;
   save();
   for (const mid of members) emitToUser(mid, 'channel:joined', channelView(c, db.users[mid]));
@@ -408,13 +489,75 @@ function createChannel(user, { name, topic, parentId }) {
 
 // ---------- HTTP ----------
 const app = express();
+
+// ----- Uploads: profile photos and the workspace logo (resized in the browser first, so they stay small) -----
+const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+app.use('/uploads', express.static(UPLOAD_DIR, { maxAge: '365d', immutable: true, fallthrough: false }));
+
+function decodeImage(dataUrl) {
+  const m = /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/=]+)$/.exec(String(dataUrl || ''));
+  if (!m) throw new Error('Please choose a PNG, JPG or WebP image.');
+  const buf = Buffer.from(m[2], 'base64');
+  if (buf.length > 1.5 * 1024 * 1024) throw new Error('That image is too large.');
+  const sig = buf.subarray(0, 12).toString('hex');
+  const ok = (m[1] === 'png' && sig.startsWith('89504e47')) || (m[1] === 'jpeg' && sig.startsWith('ffd8ff')) || (m[1] === 'webp' && sig.startsWith('52494646') && buf.subarray(8, 12).toString() === 'WEBP');
+  if (!ok) throw new Error('That file is not a valid image.');
+  return { buf, ext: m[1] === 'jpeg' ? 'jpg' : m[1] };
+}
+function removeUpload(file) {
+  if (!file || file.includes('/') || file.includes('..')) return;
+  fs.unlink(path.join(UPLOAD_DIR, file), () => {});
+}
+
+app.post('/api/upload', express.json({ limit: '2mb' }), (req, res) => {
+  const user = userFromToken((req.get('authorization') || '').replace(/^Bearer\s+/i, ''));
+  if (!user) return res.status(401).json({ error: 'Please sign in again.' });
+  const { kind, dataUrl, remove } = req.body || {};
+  try {
+    if (kind === 'avatar') {
+      const old = user.avatar;
+      if (remove) user.avatar = '';
+      else {
+        const { buf, ext } = decodeImage(dataUrl);
+        const file = `a-${user.id}-${Date.now().toString(36)}.${ext}`;
+        fs.writeFileSync(path.join(UPLOAD_DIR, file), buf);
+        user.avatar = file;
+      }
+      removeUpload(old);
+      save();
+      io.emit('user:update', publicUser(user));
+      return res.json({ ok: true, avatar: user.avatar ? '/uploads/' + user.avatar : '' });
+    }
+    if (kind === 'logo') {
+      if (!user.isAdmin) return res.status(403).json({ error: 'Admins only.' });
+      const old = db.settings.logo;
+      if (remove) db.settings.logo = '';
+      else {
+        const { buf, ext } = decodeImage(dataUrl);
+        const file = `logo-${Date.now().toString(36)}.${ext}`;
+        fs.writeFileSync(path.join(UPLOAD_DIR, file), buf);
+        db.settings.logo = file;
+      }
+      removeUpload(old);
+      save();
+      io.emit('branding', branding());
+      return res.json({ ok: true, branding: branding() });
+    }
+    res.status(400).json({ error: 'Unknown upload.' });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 app.use(express.json({ limit: '200kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/healthz', (req, res) => res.json({ ok: true, storage: storage.persistent ? 'persistent' : 'NOT persistent: data is erased on every update/restart', users: Object.values(db.users).filter((u) => !u.isBot).length, messages: db.messages.length }));
 
 app.get('/api/config', (req, res) => {
-  res.json({ workspace: WORKSPACE_NAME, inviteRequired: !!INVITE_CODE, hasUsers: Object.values(db.users).some((u) => !u.isBot) });
+  const hasUsers = Object.values(db.users).some((u) => !u.isBot);
+  res.json({ workspace: workspaceName(), branding: branding(), inviteRequired: !!inviteCode() && (hasUsers || !!INVITE_CODE), hasUsers });
 });
 
 app.get('/api/push-key', (req, res) => res.json({ key: vapid.publicKey }));
@@ -425,7 +568,8 @@ app.post('/api/register', (req, res) => {
   const cleanName = String(name || '').trim().slice(0, 60);
   if (!cleanName || !cleanEmail || !password) return res.status(400).json({ error: 'Name, email and password are required.' });
   if (String(password).length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
-  if (INVITE_CODE && invite !== INVITE_CODE) return res.status(403).json({ error: 'That invite code is not valid.' });
+  const needsCode = !!inviteCode() && (Object.values(db.users).some((u) => !u.isBot) || !!INVITE_CODE);
+  if (needsCode && String(invite || '').trim().toLowerCase() !== inviteCode().toLowerCase()) return res.status(403).json({ error: 'That sign-up code is not right. Ask your team leader for it.' });
   if (Object.values(db.users).some((u) => !u.isBot && u.email === cleanEmail)) return res.status(409).json({ error: 'An account with that email already exists.' });
 
   const isFirst = !Object.values(db.users).some((u) => !u.isBot);
@@ -484,6 +628,7 @@ mountMcp(app, {
     return bot;
   },
   canSee, displayName, messageView, postMessage, createChannel, channelSlug, updateTask,
+  checklistChanged, applyTemplate, uid, templates: () => db.checklistTemplates,
   dashboard: () => dashboard(),
 });
 
@@ -525,7 +670,9 @@ io.on('connection', (socket) => {
   const fail = (cb, err) => cb?.({ error: err.message || String(err) });
 
   socket.emit('init', {
-    workspace: WORKSPACE_NAME,
+    workspace: workspaceName(),
+    branding: branding(),
+    templates: Object.values(db.checklistTemplates).map((t) => ({ id: t.id, name: t.name })),
     me: publicUser(user),
     storageWarning: user.isAdmin ? storage.warning : null,
     prefs: prefsOf(user),
@@ -627,6 +774,84 @@ io.on('connection', (socket) => {
     cb?.({ ok: true });
   });
 
+  // ----- Channel checklists -----
+  const clChannel = (channelId) => {
+    const c = db.channels[channelId];
+    if (!canSee(me(), c) || c.isDM) throw new Error('Channel not found.');
+    return c;
+  };
+  const clHandler = (fn) => (data, cb) => { try { fn(data || {}); cb?.({ ok: true }); } catch (e) { cb?.({ error: e.message }); } };
+  socket.on('checklist:toggle', clHandler(({ channelId, itemId }) => {
+    const c = clChannel(channelId);
+    const it = (c.checklist || []).find((x) => x.id === itemId);
+    if (!it) throw new Error('Task not found.');
+    if (it.doneBy) { it.doneBy = null; it.doneAt = null; } else { it.doneBy = me().id; it.doneAt = Date.now(); }
+    checklistChanged(c);
+  }));
+  socket.on('checklist:add', clHandler(({ channelId, label, section }) => {
+    const c = clChannel(channelId);
+    const l = String(label || '').trim().slice(0, 160);
+    if (!l) throw new Error('Type the task first.');
+    c.checklist = c.checklist || [];
+    if (c.checklist.length >= 200) throw new Error('This checklist is full.');
+    c.checklist.push({ id: uid(), label: l, section: String(section || 'Our tasks').slice(0, 60), doneBy: null, doneAt: null, addedBy: me().id, custom: true });
+    checklistChanged(c);
+  }));
+  socket.on('checklist:remove', clHandler(({ channelId, itemId }) => {
+    const c = clChannel(channelId);
+    const it = (c.checklist || []).find((x) => x.id === itemId);
+    if (!it) throw new Error('Task not found.');
+    if (it.addedBy !== me().id && c.createdBy !== me().id && !me().isAdmin) throw new Error('Only the person who added it, the channel creator or an admin can remove this task.');
+    c.checklist = c.checklist.filter((x) => x.id !== itemId);
+    checklistChanged(c);
+  }));
+  socket.on('checklist:apply', clHandler(({ channelId, templateId }) => {
+    const c = clChannel(channelId);
+    applyTemplate(c, templateId, me());
+    checklistChanged(c);
+  }));
+  socket.on('checklist:clear', clHandler(({ channelId }) => {
+    const c = clChannel(channelId);
+    if (c.createdBy !== me().id && !me().isAdmin) throw new Error('Only the channel creator or an admin can remove the checklist.');
+    c.checklist = null;
+    checklistChanged(c);
+  }));
+
+  // ----- Admin: checklist templates & workspace settings -----
+  socket.on('templates:get', (_, cb) => cb?.({ templates: Object.values(db.checklistTemplates) }));
+  socket.on('templates:save', ({ templates }, cb) => {
+    if (!me().isAdmin) return cb?.({ error: 'Admins only.' });
+    const next = {};
+    for (const t of (Array.isArray(templates) ? templates : []).slice(0, 20)) {
+      const name = String(t?.name || '').trim().slice(0, 40);
+      if (!name) continue;
+      const id = /^[a-z0-9_-]{2,30}$/.test(t.id || '') ? t.id : channelSlug(name).slice(0, 30) || uid();
+      next[id] = { id, name, text: String(t.text || '').slice(0, 8000) };
+    }
+    if (!Object.keys(next).length) return cb?.({ error: 'Keep at least one checklist.' });
+    db.checklistTemplates = next;
+    save();
+    io.emit('templates', Object.values(next).map((t) => ({ id: t.id, name: t.name })));
+    cb?.({ ok: true });
+  });
+  socket.on('settings:get', (_, cb) => {
+    if (!me().isAdmin) return cb?.({ error: 'Admins only.' });
+    cb?.({ inviteCode: inviteCode(), envCode: !!INVITE_CODE && !db.settings.inviteCode, workspaceName: workspaceName(), showName: db.settings.showName !== false });
+  });
+  socket.on('settings:update', (patch, cb) => {
+    if (!me().isAdmin) return cb?.({ error: 'Admins only.' });
+    if (patch?.inviteCode !== undefined) {
+      const code = String(patch.inviteCode).trim().slice(0, 40);
+      if (code && code.length < 4) return cb?.({ error: 'Use at least 4 characters for the sign-up code.' });
+      db.settings.inviteCode = code;
+    }
+    if (patch?.workspaceName !== undefined) db.settings.workspaceName = String(patch.workspaceName).trim().slice(0, 40) || '';
+    if (patch?.showName !== undefined) db.settings.showName = !!patch.showName;
+    save();
+    io.emit('branding', branding());
+    cb?.({ ok: true });
+  });
+
   socket.on('task:update', ({ messageId, taskId, action }, cb) => {
     try { updateTask(me(), messageId, taskId, action); cb?.({ ok: true }); } catch (e) { cb?.({ error: e.message }); }
   });
@@ -663,8 +888,8 @@ io.on('connection', (socket) => {
     for (const id of c.members) if (id !== me().id) emitToUser(id, 'typing', { channelId, parentId: parentId || null, userId: me().id });
   });
 
-  socket.on('channel:create', ({ name, topic, parentId }, cb) => {
-    try { const c = createChannel(me(), { name, topic, parentId }); ok(cb, { id: c.id }); } catch (e) { fail(cb, e); }
+  socket.on('channel:create', ({ name, topic, parentId, templateId }, cb) => {
+    try { const c = createChannel(me(), { name, topic, parentId, templateId }); ok(cb, { id: c.id }); } catch (e) { fail(cb, e); }
   });
 
   socket.on('channel:join', ({ channelId }, cb) => {
