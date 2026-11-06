@@ -47,6 +47,12 @@
   });
   $('#logout').addEventListener('click', async (e) => {
     e.stopPropagation();
+    // Stop sending this device notifications for this account.
+    try {
+      const reg = await navigator.serviceWorker?.getRegistration();
+      const sub = await reg?.pushManager.getSubscription();
+      if (sub) { S.socket?.emit('push:unsubscribe', { endpoint: sub.endpoint }); await sub.unsubscribe(); }
+    } catch {}
     await fetch('/api/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + store.get(TOKEN_KEY) } });
     store.del(TOKEN_KEY);
     location.reload();
@@ -70,11 +76,14 @@
       $('#app').classList.remove('hidden');
       renderMe();
       renderSidebar();
+      const fromLink = new URLSearchParams(location.search).get('c');
+      if (fromLink) history.replaceState(null, '', '/');
       const last = store.get('kaizenhq_last');
-      const start = (last && S.channels[last]) ? last : (Object.values(S.channels).find((c) => c.name === 'general') || Object.values(S.channels)[0])?.id;
+      const start = [fromLink, last].find((id) => id && S.channels[id]) || (Object.values(S.channels).find((c) => c.name === 'general') || Object.values(S.channels)[0])?.id;
       S.messages = {};
       if (start) openChannel(start);
-      if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {});
+      socket.emit('visible', { visible: !document.hidden });
+      setupAppBanners();
     });
     socket.on('presence', ({ userId, online }) => { online ? S.online.add(userId) : S.online.delete(userId); renderSidebar(); });
     socket.on('user:new', (u) => { S.users[u.id] = u; renderSidebar(); });
@@ -354,6 +363,8 @@
   }
   function notify(m, c) {
     if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    if (document.hidden && S.pushOn) return; // the server's push notification covers this
+    if (navigator.serviceWorker?.controller && isMobile) return; // phones only show notifications via push
     const u = S.users[m.userId];
     const n = new Notification(c.isDM ? u?.name : `${u?.name} in #${c.name}`, { body: m.text.slice(0, 140), tag: m.channelId });
     n.onclick = () => { window.focus(); openChannel(m.channelId); n.close(); };
@@ -596,6 +607,79 @@
     bindResults();
   }
   $('#search-open').addEventListener('click', openSearch);
+
+  // ---------- Mobile app: install, notifications, offline ----------
+  const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isMobile = isIOS || /android/i.test(navigator.userAgent);
+  const isStandalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  let installEvent = null;
+
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+    navigator.serviceWorker.addEventListener('message', (e) => {
+      if (e.data?.type === 'open-channel' && S.channels[e.data.channelId]) openChannel(e.data.channelId);
+    });
+  }
+  window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installEvent = e; if (S.me) setupAppBanners(); });
+  window.addEventListener('appinstalled', () => $('#install-banner').classList.add('hidden'));
+  document.addEventListener('visibilitychange', () => {
+    S.socket?.emit('visible', { visible: !document.hidden });
+    if (!document.hidden && S.current) S.socket?.emit('read', { channelId: S.current });
+  });
+
+  const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  const dismissed = (k) => store.get('kaizenhq_dismiss_' + k);
+
+  function setupAppBanners() {
+    // Install prompt
+    const ib = $('#install-banner');
+    if (!isStandalone && !dismissed('install') && isIOS) {
+      $('#install-text').innerHTML = '📱 Add Kaizen HQ to your Home Screen: tap <svg class="share-icon" width="15" height="15" viewBox="0 0 24 24"><path d="M12 3v12M7 8l5-5 5 5M5 12v8h14v-8" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg> <b>Share</b>, then <b>Add to Home Screen</b>. Notifications on iPhone work once it\'s added.';
+      $('#install-btn').classList.add('hidden');
+      ib.classList.remove('hidden');
+    } else if (!isStandalone && !dismissed('install') && installEvent) {
+      $('#install-text').textContent = '📱 Install Kaizen HQ as an app on this device. It opens full-screen from your home screen.';
+      $('#install-btn').classList.remove('hidden');
+      ib.classList.remove('hidden');
+    } else ib.classList.add('hidden');
+
+    // Notifications prompt (iPhone only allows this inside the installed app)
+    const nb = $('#notify-banner');
+    const canAsk = pushSupported() && Notification.permission === 'default' && (!isIOS || isStandalone);
+    nb.classList.toggle('hidden', !canAsk || !!dismissed('notify'));
+    if (pushSupported() && Notification.permission === 'granted') subscribePush();
+  }
+  $('#install-btn').addEventListener('click', async () => {
+    if (!installEvent) return;
+    installEvent.prompt();
+    await installEvent.userChoice.catch(() => {});
+    installEvent = null;
+    $('#install-banner').classList.add('hidden');
+  });
+  $('#notify-btn').addEventListener('click', async () => {
+    const result = await Notification.requestPermission();
+    $('#notify-banner').classList.add('hidden');
+    if (result === 'granted') { await subscribePush(); toast('Notifications are on'); }
+    else toast('Notifications are off. You can turn them on later in your device settings.');
+  });
+  document.querySelectorAll('[data-dismiss]').forEach((b) => b.addEventListener('click', () => {
+    store.set('kaizenhq_dismiss_' + b.dataset.dismiss, '1');
+    b.closest('.app-banner').classList.add('hidden');
+  }));
+
+  async function subscribePush() {
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        const { key } = await fetch('/api/push-key').then((r) => r.json());
+        const raw = atob(key.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (key.length % 4)) % 4));
+        sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: Uint8Array.from(raw, (ch) => ch.charCodeAt(0)) });
+      }
+      S.socket.emit('push:subscribe', { subscription: sub.toJSON() });
+      S.pushOn = true;
+    } catch (err) { console.warn('Push setup failed', err); }
+  }
 
   initAuth();
 })();

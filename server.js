@@ -7,6 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { Server } = require('socket.io');
+const webpush = require('web-push');
 
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -41,6 +42,19 @@ try {
 } catch {
   db = freshDb();
 }
+
+// ---------- Push notifications (VAPID keys are generated once and saved) ----------
+const VAPID_FILE = path.join(DATA_DIR, 'vapid.json');
+let vapid;
+if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
+  vapid = { publicKey: process.env.VAPID_PUBLIC_KEY, privateKey: process.env.VAPID_PRIVATE_KEY };
+} else {
+  try { vapid = JSON.parse(fs.readFileSync(VAPID_FILE, 'utf8')); } catch {
+    vapid = webpush.generateVAPIDKeys();
+    fs.writeFileSync(VAPID_FILE, JSON.stringify(vapid));
+  }
+}
+webpush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:info@kaizenrealestate.ca', vapid.publicKey, vapid.privateKey);
 
 let saveTimer = null;
 function save() {
@@ -86,6 +100,8 @@ app.use(express.static(path.join(__dirname, 'public')));
 app.get('/api/config', (req, res) => {
   res.json({ workspace: WORKSPACE_NAME, inviteRequired: !!INVITE_CODE, hasUsers: Object.keys(db.users).length > 0 });
 });
+
+app.get('/api/push-key', (req, res) => res.json({ key: vapid.publicKey }));
 
 app.post('/api/register', (req, res) => {
   const { name, email, password, title, invite } = req.body || {};
@@ -142,6 +158,43 @@ const io = new Server(server);
 
 // ---------- Realtime ----------
 const online = new Map(); // userId -> socket count
+
+// True if the user has the app open and on screen somewhere.
+function isWatching(userId) {
+  for (const s of io.sockets.sockets.values()) if (s.data.userId === userId && s.data.visible) return true;
+  return false;
+}
+
+function pushTo(userId, payload) {
+  const u = db.users[userId];
+  if (!u?.push?.length || isWatching(userId)) return;
+  for (const sub of [...u.push]) {
+    webpush.sendNotification(sub, JSON.stringify(payload), { TTL: 3600 }).catch((err) => {
+      if (err.statusCode === 404 || err.statusCode === 410) {
+        u.push = u.push.filter((x) => x.endpoint !== sub.endpoint);
+        save();
+      }
+    });
+  }
+}
+
+function notifyRecipients(c, m, sender) {
+  const recipients = new Set();
+  if (c.isDM) c.members.forEach((id) => recipients.add(id));
+  const mentions = m.mentions || [];
+  if (mentions.includes('*')) c.members.forEach((id) => recipients.add(id));
+  mentions.forEach((id) => c.members.includes(id) && recipients.add(id));
+  if (m.parentId) {
+    const parent = db.messages.find((p) => p.id === m.parentId);
+    if (parent) recipients.add(parent.userId);
+    db.messages.filter((r) => r.parentId === m.parentId).forEach((r) => recipients.add(r.userId));
+  }
+  recipients.delete(sender.id);
+  const where = c.isDM ? sender.name : `${sender.name} in #${c.name}`;
+  for (const id of recipients) {
+    pushTo(id, { title: m.parentId ? `${where} (thread)` : where, body: m.text.slice(0, 180), channelId: c.id, tag: c.id });
+  }
+}
 
 function canSee(user, channel) {
   return channel && channel.members.includes(user.id);
@@ -235,6 +288,7 @@ io.on('connection', (socket) => {
     }
     save();
     emitToChannel(c, 'message:new', messageView(m));
+    notifyRecipients(c, m, me());
     cb?.({ ok: true });
   });
 
@@ -363,6 +417,24 @@ io.on('connection', (socket) => {
       .filter((m) => visible.has(m.channelId) && !m.deleted && m.text.toLowerCase().includes(term))
       .slice(-40).reverse().map(messageView);
     cb?.({ results });
+  });
+
+  socket.data.visible = true;
+  socket.on('visible', ({ visible }) => { socket.data.visible = !!visible; });
+
+  socket.on('push:subscribe', ({ subscription }) => {
+    if (!subscription?.endpoint) return;
+    const u = me();
+    u.push = (u.push || []).filter((x) => x.endpoint !== subscription.endpoint);
+    u.push.push(subscription);
+    // One endpoint belongs to one device: remove it from any other account that used this phone.
+    for (const other of Object.values(db.users)) if (other.id !== u.id && other.push) other.push = other.push.filter((x) => x.endpoint !== subscription.endpoint);
+    save();
+  });
+  socket.on('push:unsubscribe', ({ endpoint }) => {
+    const u = me();
+    u.push = (u.push || []).filter((x) => x.endpoint !== endpoint);
+    save();
   });
 
   socket.on('disconnect', () => {

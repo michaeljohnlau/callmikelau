@@ -14,7 +14,19 @@ Private, real-time team chat for **Kaizen Real Estate Team**. It gives the team 
 - **Formatting:** `**bold**`, `_italic_`, `~strike~`, `` `code` ``, ```` ```code blocks``` ````, `> quotes`, and links become clickable.
 - **Profiles:** each person has a name, role and status (e.g. "🏡 At a listing appointment").
 - **Admin:** the first person to sign up becomes the admin and can delete any message.
-- **Mobile:** works in a phone browser. Add it to your home screen to use it like an app.
+- **Mobile app:** installs on iPhone and Android with push notifications. See below.
+
+## Mobile app (iPhone + Android)
+
+Kaizen HQ installs on phones like a regular app. It gets a home-screen icon, opens full-screen, and sends push notifications. No App Store is needed.
+
+**iPhone (iOS 16.4+):** open the site in **Safari** → tap **Share** → **Add to Home Screen** → open Kaizen HQ from the home screen → tap **Turn on notifications**.
+
+**Android:** open the site in **Chrome** → tap **Install** on the banner (or ⋮ menu → **Install app**) → tap **Turn on notifications**.
+
+Push notifications go out for **direct messages, @mentions, @here/@channel and thread replies**, only when the app isn't open on screen. This keeps people from getting buzzed twice.
+
+> Push needs the site on **HTTPS**, which every host listed below provides. The push keys are saved in `DATA_DIR/vapid.json`. Keep that folder on a persistent disk, or set `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY`, so phones stay subscribed between restarts.
 
 ## Run it locally
 
@@ -34,7 +46,9 @@ Open http://localhost:3000 and create the first account (that account becomes th
 | `PORT` | `3000` | Port to listen on |
 | `INVITE_CODE` | *(none)* | If set, new sign-ups must enter this code. **Set this before going live.** |
 | `WORKSPACE_NAME` | `Kaizen HQ` | Name shown in the app |
-| `DATA_DIR` | `./data` | Where messages and accounts are saved (`db.json`) |
+| `DATA_DIR` | `./data` | Where messages, accounts and push keys are saved |
+| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | *(auto-generated)* | Optional fixed keys for push notifications |
+| `VAPID_SUBJECT` | `mailto:info@kaizenrealestate.ca` | Contact address sent to Apple/Google push services |
 
 ## Put it online
 
@@ -52,3 +66,4 @@ The app is a single Node server. Any host that runs Node and has **persistent di
 
 - `server.js`: the API, real-time messaging (Socket.IO) and storage
 - `public/`: the web app (`index.html`, `styles.css`, `app.js`)
+- `public/sw.js`, `public/manifest.webmanifest` and `public/icons/`: the installable mobile app (offline shell and push notifications)

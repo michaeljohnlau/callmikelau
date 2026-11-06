@@ -200,6 +200,21 @@ mark { background: var(--mention-bg); color: inherit; font-weight: 600; }
 
 .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--charcoal); color: #fff; padding: 10px 16px; border-radius: 8px; font-size: 14px; z-index: 40; border-left: 3px solid var(--gold); }
 
+/* ---------- Install / notification banners ---------- */
+.app-banner { margin: 10px 10px 0; padding: 12px; border-radius: 10px; background: #1a1712; border: 1px solid #3a3122; color: #e9e2d4; font-size: 13px; line-height: 1.4; }
+.banner-row { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
+.banner-btn { background: var(--gold); color: var(--charcoal); border: 0; border-radius: 7px; padding: 6px 12px; font-weight: 600; font-size: 13px; }
+.banner-x { background: transparent; border: 0; color: #8c877e; font-size: 13px; }
+.share-icon { display: inline-block; vertical-align: -3px; }
+
+/* ---------- Installed app: respect the notch and home bar ---------- */
+.sidebar { padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+.chan-header { padding-top: max(12px, env(safe-area-inset-top)); }
+.panel-header { padding-top: max(14px, env(safe-area-inset-top)); }
+.composer { padding-bottom: max(18px, env(safe-area-inset-bottom)); }
+.thread-composer { padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+@media (display-mode: standalone) { body { overscroll-behavior: none; } }
+
 /* ---------- Responsive ---------- */
 @media (max-width: 1100px) {
   .panel { position: fixed; right: 0; top: 0; bottom: 0; width: min(420px, 100%); z-index: 10; box-shadow: -10px 0 40px rgba(0,0,0,.2); }
@@ -213,5 +228,8 @@ mark { background: var(--mention-bg); color: inherit; font-weight: 600; }
   .msg, .panel .msg { padding-left: 12px; padding-right: 12px; }
   .composer { padding: 0 12px 12px; }
   .hint { display: none; }
+  .composer textarea, .edit-box textarea, input { font-size: 16px; }
+  .chan-header { padding-top: max(10px, env(safe-area-inset-top)); }
+  .composer { padding-bottom: max(12px, env(safe-area-inset-bottom)); }
   .msg-actions { right: 12px; }
 }
