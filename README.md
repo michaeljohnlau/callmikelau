@@ -39,6 +39,16 @@ Push notifications go out for **direct messages, @mentions, @here/@channel and t
 
 Kaizen HQ registers a `peopleCreated` webhook with Follow Up Boss. Every new lead is then posted with name, phone, email, source, stage, price, address, tags and a link back to Follow Up Boss. The assigned agent is @mentioned, so they get a push notification. Retries never post a lead twice.
 
+**First steps (lead playbooks).** Each lead is sorted as a **seller**, **buyer** or **other** lead, using the inquiry type, tags, source and stage. It is then posted with a checklist:
+
+| Lead | Default first steps | Pinned until done |
+|---|---|---|
+| 🏡 Seller | Call {first} within 5 minutes · Prepare CMA for {address} · Book the listing appointment | Yes |
+| 🔑 Buyer | Call {first} within 5 minutes · Send matching listings | No |
+| 🆕 Other | Call {first} within 5 minutes | No |
+
+Teammates tap **I'll take it** to claim a step, then tick it off when it's done. Each claim and completion is noted in the lead's thread. When every step is done, a pinned lead unpins itself. You can edit the steps and pin settings under **Settings → Integrations → First steps for new leads**.
+
 If Follow Up Boss responds that a system key is required, register free at apps.followupboss.com/system-registration (system name `KaizenHQ`). Then paste the key under **Advanced: system key** and press Connect again.
 
 ## API (Zapier, Make, website forms)
@@ -51,6 +61,8 @@ curl -X POST https://<your-domain>/api/v1/messages \
   -d '{"channel": "leads", "text": "New valuation request: 8 Elm Ave"}'
 ```
 
+Add `"tasks": ["Prepare CMA for 8 Elm Ave"], "pin": true` to post with a first-steps checklist.
+
 `GET /api/v1/channels` lists the channels. A `channel` can be a name like `leads`, a sub-channel like `listings/24-juniper-crescent`, or an id.
 
 ## Connect Grok (or another AI assistant) over MCP
@@ -61,9 +73,10 @@ Kaizen HQ includes an MCP server at `https://<your-domain>/mcp` (Streamable HTTP
 2. Connect it:
    - **Grok chat (grok.com → Connectors → New Connector → Custom):** paste the single link shown after creating the key, `https://<your-domain>/mcp/<key>`.
    - **Grok Bot, xAI API, Claude or other MCP apps that support headers:** URL `https://<your-domain>/mcp` with header `Authorization: Bearer <key>`.
-3. The assistant appears in the team list with an **AI** tag. Remove it any time from the same screen and its key stops working immediately.
+3. Create **one key per bot** (e.g. "Grok CMA", "Grok Marketing"). Each bot posts under its own name, shows when it was last used, and can be removed on its own.
+4. The assistant appears in the team list with an **AI** tag. Remove it any time from the same screen and its key stops working immediately.
 
-**Tools it gets:** `list_channels`, `read_messages`, `read_thread`, `search_messages`, `get_my_mentions` (who @mentioned it and whether it has answered yet), `send_message` (including thread replies), `create_channel` (including listing sub-channels) and `list_team`.
+**Tools it gets:** `list_open_tasks` and `update_task` (find and claim or complete first steps, e.g. a CMA), `list_channels`, `read_messages`, `read_thread`, `search_messages`, `get_my_mentions` (who @mentioned it and whether it has answered yet), `send_message` (including thread replies), `create_channel` (including listing sub-channels) and `list_team`.
 
 **What it can see:** all public channels and sub-channels. It cannot see direct messages between teammates, only DMs sent to the assistant itself.
 

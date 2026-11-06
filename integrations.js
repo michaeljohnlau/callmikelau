@@ -12,6 +12,15 @@ const crypto = require('crypto');
 const FUB_API = process.env.FUB_API_URL || 'https://api.followupboss.com/v1'; // override only for testing
 const SYSTEM_NAME = 'KaizenHQ';
 
+// What the team does first for each kind of lead. Editable in Settings → Integrations.
+// {name}, {first} and {address} are filled in from the lead.
+const DEFAULT_PLAYBOOKS = {
+  seller: { pin: true, steps: ['Call {first} within 5 minutes', 'Prepare CMA for {address}', 'Book the listing appointment'] },
+  buyer: { pin: false, steps: ['Call {first} within 5 minutes', 'Send matching listings'] },
+  other: { pin: false, steps: ['Call {first} within 5 minutes'] },
+};
+const TYPE_LABEL = { seller: '🏡 New SELLER lead', buyer: '🔑 New BUYER lead', other: '🆕 New lead' };
+
 function mountIntegrations(app, core) {
   const cfg = () => (core.db.integrations = core.db.integrations || {}).fub || null;
   const setCfg = (v) => { core.db.integrations = core.db.integrations || {}; core.db.integrations.fub = v; core.save(); };
@@ -55,32 +64,67 @@ function mountIntegrations(app, core) {
 
   const clean = (s) => String(s || '').replace(/[*_`~]/g, '').trim();
 
-  function formatLead(p) {
+  const playbooks = () => {
+    const saved = cfg()?.playbooks || {};
+    return Object.fromEntries(Object.entries(DEFAULT_PLAYBOOKS).map(([k, d]) => [k, { ...d, ...(saved[k] || {}) }]));
+  };
+
+  // Seller, buyer or other, based on the inquiry type, tags, source and stage in Follow Up Boss.
+  function classify(p, events) {
+    const hay = [...events.map((e) => `${e.type || ''} ${e.description || ''}`), ...(p.tags || []), p.source, p.stage, p.type]
+      .filter(Boolean).join(' ').toLowerCase();
+    if (/seller|selling|sell my|home ?value|valuation|cma|what'?s my home worth|listing appointment|list my/.test(hay)) return 'seller';
+    if (/buyer|buying|property inquiry|viewed property|saved property|showing|pre-?approv|first.?time/.test(hay)) return 'buyer';
+    return 'other';
+  }
+
+  function addressOf(a) {
+    if (!a) return '';
+    return [a.street, a.city, a.state || a.province].filter(Boolean).map(clean).join(', ');
+  }
+
+  function buildLead(p, events, { test = false } = {}) {
+    const type = classify(p, events);
+    const ev = events.find((e) => e.property || e.message) || events[0] || {};
     const name = clean(p.name || [p.firstName, p.lastName].filter(Boolean).join(' ')) || 'New contact';
+    const first = clean(p.firstName) || name.split(' ')[0];
+    const propertyAddr = addressOf(ev.property);
+    const homeAddr = addressOf((p.addresses || [])[0]);
+    // For sellers, the property they asked about is usually their own home.
+    const address = type === 'seller' ? (propertyAddr || homeAddr) : homeAddr;
     const phone = (p.phones || []).map((x) => x.value).filter(Boolean)[0];
     const email = (p.emails || []).map((x) => x.value).filter(Boolean)[0];
-    const lines = [`🆕 **New lead: ${name}**`];
+
+    const lines = [];
+    if (test) lines.push('🧪 _Test: this is your most recent Follow Up Boss contact._');
+    lines.push(`**${TYPE_LABEL[type]}: ${name}**`);
     const contact = [phone && `📞 ${phone}`, email && `✉️ ${email}`].filter(Boolean).join('  ·  ');
     if (contact) lines.push(contact);
-    const meta = [p.source && `Source: ${clean(p.source)}`, p.stage && `Stage: ${clean(p.stage)}`, p.price && `Price: $${Number(p.price).toLocaleString('en-CA')}`].filter(Boolean).join('  ·  ');
+    if (type === 'seller') lines.push(address ? `🏠 Property: **${address}**` : '🏠 Property: _no address given. Ask on the first call_');
+    else if (propertyAddr) lines.push(`🏠 Interested in: ${propertyAddr}${ev.property?.price ? ` ($${Number(ev.property.price).toLocaleString('en-CA')})` : ''}`);
+    if (type !== 'seller' && homeAddr) lines.push(`📍 ${homeAddr}`);
+    const meta = [ev.type && `Inquiry: ${clean(ev.type)}`, p.source && `Source: ${clean(p.source)}`, p.stage && `Stage: ${clean(p.stage)}`, p.price && `Price: $${Number(p.price).toLocaleString('en-CA')}`].filter(Boolean).join('  ·  ');
     if (meta) lines.push(meta);
-    const addr = (p.addresses || [])[0];
-    if (addr) {
-      const a = [addr.street, addr.city, addr.state].filter(Boolean).map(clean).join(', ');
-      if (a) lines.push(`📍 ${a}`);
-    }
+    const msg = clean(ev.message || ev.description);
+    if (msg) lines.push(`> ${msg.slice(0, 300).replace(/\n+/g, ' ')}`);
     if (p.tags?.length) lines.push(`🏷️ ${p.tags.slice(0, 8).map(clean).join(', ')}`);
-    // @mention the assigned agent if they're in Kaizen HQ, so they get notified right away.
     const assigned = clean(p.assignedTo);
     if (assigned) {
       const member = Object.values(core.db.users).find((u) => !u.isBot && !u.disabled && u.name.toLowerCase() === assigned.toLowerCase());
       lines.push(`👤 Assigned to ${member ? '@' + member.name : assigned}`);
     } else {
-      lines.push('👤 Not assigned yet');
+      lines.push('👤 Not assigned yet. Claim a step below to take it');
     }
     if (p.id) lines.push(`🔗 https://app.followupboss.com/2/people/view/${p.id}`);
-    return lines.join('\n');
+
+    const pb = playbooks()[type];
+    const fill = (t) => t.replace(/\{name\}/g, name).replace(/\{first\}/g, first)
+      .replace(/\{address\}/g, address || '(address to confirm)');
+    return { type, text: lines.join('\n'), tasks: (pb.steps || []).map(fill).filter(Boolean), pin: !!pb.pin };
   }
+
+  // Backwards-compatible helper used by tests.
+  const formatLead = (p) => buildLead(p, []).text;
 
   async function postLead(personId, { test = false } = {}) {
     const c = cfg();
@@ -88,8 +132,10 @@ function mountIntegrations(app, core) {
     c.posted = c.posted || [];
     if (!test && c.posted.includes(personId)) return; // Follow Up Boss can retry; never post twice
     const p = await fub(`/people/${personId}?fields=allFields`);
-    const text = (test ? '🧪 _Test: this is your most recent Follow Up Boss contact._\n' : '') + formatLead(p);
-    core.postMessage(fubBot(), c.channelId, text);
+    // The inquiry (type, message, property address) lives in the person's events.
+    const events = await fub(`/events?personId=${personId}&limit=5&sort=-created`).then((r) => r?.events || []).catch(() => []);
+    const lead = buildLead(p, events, { test });
+    core.postMessage(fubBot(), c.channelId, lead.text, null, { tasks: lead.tasks, pin: lead.pin, leadType: lead.type });
     if (!test) {
       c.posted.push(personId);
       if (c.posted.length > 2000) c.posted = c.posted.slice(-1000);
@@ -119,11 +165,11 @@ function mountIntegrations(app, core) {
   // ----- Admin controls (called from the Settings screen) -----
   function status() {
     const c = cfg();
-    if (!c) return { connected: false };
+    if (!c) return { connected: false, playbooks: playbooks() };
     return {
       connected: !!c.apiKey, channelId: c.channelId, keyHint: c.apiKey ? '••••' + c.apiKey.slice(-4) : '',
       account: c.account || '', webhook: !!c.webhookId, webhookNote: c.webhookNote || '', lastLeadAt: c.lastLeadAt || null,
-      systemKeySet: !!c.systemKey,
+      systemKeySet: !!c.systemKey, playbooks: playbooks(),
     };
   }
 
@@ -182,7 +228,21 @@ function mountIntegrations(app, core) {
     return { ok: true };
   }
 
-  return { status, connect, disconnect, test, _formatLead: formatLead };
+  function savePlaybooks(input) {
+    const c = cfg();
+    if (!c) throw new Error('Connect Follow Up Boss first.');
+    const next = {};
+    for (const k of Object.keys(DEFAULT_PLAYBOOKS)) {
+      const v = (input && input[k]) || {};
+      const steps = Array.isArray(v.steps) ? v.steps : String(v.steps || '').split('\n');
+      next[k] = { pin: !!v.pin, steps: steps.map((x) => String(x).trim().slice(0, 200)).filter(Boolean).slice(0, 10) };
+    }
+    c.playbooks = next;
+    core.save();
+    return status();
+  }
+
+  return { status, connect, disconnect, test, savePlaybooks, _formatLead: formatLead, _buildLead: buildLead };
 }
 
 module.exports = { mountIntegrations };

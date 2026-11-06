@@ -171,6 +171,7 @@ function messageView(m) {
     parentId: m.parentId || null, edited: !!m.edited, deleted: !!m.deleted,
     reactions: m.reactions || {}, replyCount: m.replyCount || 0, lastReplyTs: m.lastReplyTs || null,
     pinned: !!m.pinned, mentions: m.mentions || [],
+    tasks: m.tasks || null, leadType: m.leadType || null,
   };
 }
 
@@ -237,7 +238,7 @@ function notifyRecipients(c, m, sender) {
   }
 }
 
-function postMessage(user, channelId, text, parentId) {
+function postMessage(user, channelId, text, parentId, opts = {}) {
   const c = db.channels[channelId];
   const clean = String(text || '').trim().slice(0, 4000);
   if (!canSee(user, c)) throw new Error('You are not a member of that channel.');
@@ -252,6 +253,14 @@ function postMessage(user, channelId, text, parentId) {
     emitToChannel(c, 'channel:members', { channelId: c.id, members: c.members });
   }
   const m = { id: uid(), channelId: c.id, userId: user.id, text: clean, ts: Date.now(), parentId: parentId || null, reactions: {}, mentions: parseMentions(clean) };
+  // Optional first-steps checklist (e.g. "Prepare CMA") and auto-pin, used for new leads.
+  const tasks = (Array.isArray(opts.tasks) ? opts.tasks : []).map((t) => String(t || '').trim().slice(0, 200)).filter(Boolean).slice(0, 10);
+  if (tasks.length && !parentId) {
+    m.tasks = tasks.map((label) => ({ id: uid(), label, claimedBy: null, claimedAt: null, doneBy: null, doneAt: null }));
+    m.autoUnpin = !!opts.pin;
+  }
+  if (opts.pin && !parentId) m.pinned = true;
+  if (opts.leadType) m.leadType = String(opts.leadType).slice(0, 20);
   db.messages.push(m);
   user.lastRead = user.lastRead || {};
   user.lastRead[c.id] = m.ts;
@@ -264,6 +273,42 @@ function postMessage(user, channelId, text, parentId) {
   save();
   emitToChannel(c, 'message:new', messageView(m));
   notifyRecipients(c, m, user);
+  return m;
+}
+
+// Claim / complete a first-step task. Posts a short thread reply so the whole team sees who's on it.
+function updateTask(user, messageId, taskId, action) {
+  const m = db.messages.find((x) => x.id === messageId);
+  const c = m && db.channels[m.channelId];
+  if (!m || !canSee(user, c)) throw new Error('Message not found.');
+  const t = (m.tasks || []).find((x) => x.id === taskId);
+  if (!t) throw new Error('Task not found.');
+  const name = (id) => db.users[id]?.name || 'someone';
+  let note = null;
+  if (action === 'claim') {
+    if (t.claimedBy && t.claimedBy !== user.id) throw new Error(`${name(t.claimedBy)} already has this one.`);
+    if (t.claimedBy === user.id) return m;
+    t.claimedBy = user.id; t.claimedAt = Date.now();
+    note = `🙋 I'm on it: **${t.label}**`;
+  } else if (action === 'unclaim') {
+    if (t.claimedBy !== user.id && !user.isAdmin) throw new Error('Only the person who claimed it (or an admin) can release it.');
+    t.claimedBy = null; t.claimedAt = null;
+    note = `↩️ Released: **${t.label}**. Who can take it?`;
+  } else if (action === 'done') {
+    if (t.doneBy) return m;
+    t.doneBy = user.id; t.doneAt = Date.now();
+    if (!t.claimedBy) { t.claimedBy = user.id; t.claimedAt = t.doneAt; }
+    note = `✅ Done: **${t.label}**`;
+  } else if (action === 'undo') {
+    t.doneBy = null; t.doneAt = null;
+    note = `🔄 Reopened: **${t.label}**`;
+  } else throw new Error('Unknown action.');
+  const allDone = m.tasks.every((x) => x.doneBy);
+  if (allDone && m.pinned && m.autoUnpin) { m.pinned = false; note += '\n🎉 All first steps are done. Unpinned.'; }
+  if (!allDone && action === 'undo' && m.autoUnpin && !m.pinned) m.pinned = true;
+  save();
+  emitToChannel(c, 'message:update', messageView(m));
+  if (note) postMessage(user, c.id, note, m.id);
   return m;
 }
 
@@ -365,7 +410,7 @@ mountMcp(app, {
     save();
     return bot;
   },
-  canSee, displayName, messageView, postMessage, createChannel, channelSlug,
+  canSee, displayName, messageView, postMessage, createChannel, channelSlug, updateTask,
 });
 
 const integrations = mountIntegrations(app, {
@@ -452,6 +497,10 @@ io.on('connection', (socket) => {
     m.text = '';
     save();
     emitToChannel(db.channels[m.channelId], 'message:update', messageView(m));
+  });
+
+  socket.on('task:update', ({ messageId, taskId, action }, cb) => {
+    try { updateTask(me(), messageId, taskId, action); cb?.({ ok: true }); } catch (e) { cb?.({ error: e.message }); }
   });
 
   socket.on('message:pin', ({ messageId }) => {
@@ -620,6 +669,7 @@ io.on('connection', (socket) => {
   socket.on('fub:connect', adminOnly(async (d) => ({ status: await integrations.connect(d) })));
   socket.on('fub:disconnect', adminOnly(async () => ({ status: await integrations.disconnect() })));
   socket.on('fub:test', adminOnly(async () => integrations.test()));
+  socket.on('fub:playbooks', adminOnly(async (d) => ({ status: integrations.savePlaybooks(d.playbooks) })));
 
   socket.data.visible = true;
   socket.on('visible', ({ visible }) => { socket.data.visible = !!visible; });

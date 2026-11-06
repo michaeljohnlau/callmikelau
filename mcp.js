@@ -52,6 +52,8 @@ function mountMcp(app, core) {
       thread_id: v.parentId || undefined, replies: v.replyCount || undefined,
       reactions: Object.keys(v.reactions).length ? Object.fromEntries(Object.entries(v.reactions).map(([e, ids]) => [e, ids.length])) : undefined,
       pinned: v.pinned || undefined,
+      lead_type: v.leadType || undefined,
+      tasks: v.tasks ? v.tasks.map((t) => ({ task_id: t.id, step: t.label, claimed_by: t.claimedBy ? nameOf(t.claimedBy) : null, done: !!t.doneBy })) : undefined,
     };
   }
 
@@ -187,6 +189,42 @@ function mountMcp(app, core) {
       }
     });
 
+    server.registerTool('list_open_tasks', {
+      title: 'List open first steps',
+      description: 'List messages (usually new leads) that still have unfinished first steps, such as "Prepare CMA for 24 Juniper Crescent", with who has claimed each step.',
+      inputSchema: {
+        channel: z.string().optional().describe('Limit to one channel, e.g. "leads"'),
+        unclaimed_only: z.boolean().optional().describe('Only steps nobody has claimed yet'),
+      },
+      annotations: { readOnlyHint: true },
+    }, async ({ channel, unclaimed_only }) => {
+      const only = channel ? resolveChannel(bot, channel) : null;
+      if (channel && !only) return error(`Channel "${channel}" not found.`);
+      const list = core.db.messages
+        .filter((m) => m.tasks && !m.deleted && (!only || m.channelId === only.id) && core.canSee(bot, core.db.channels[m.channelId]))
+        .filter((m) => m.tasks.some((t) => !t.doneBy && (!unclaimed_only || !t.claimedBy)))
+        .slice(-30).reverse()
+        .map((m) => ({ channel: core.displayName(core.db.channels[m.channelId]), ...msgInfo(m) }));
+      return text(list);
+    });
+
+    server.registerTool('update_task', {
+      title: 'Claim or complete a first step',
+      description: 'Claim a step (so the team knows you are on it), release it, mark it done, or reopen it. A short note is posted in the thread automatically.',
+      inputSchema: {
+        message_id: z.string(),
+        task_id: z.string(),
+        action: z.enum(['claim', 'unclaim', 'done', 'undo']),
+      },
+    }, async ({ message_id, task_id, action }) => {
+      try {
+        const m = core.updateTask(bot, message_id, task_id, action);
+        return text({ ok: true, message: msgInfo(m) });
+      } catch (e) {
+        return error(e.message);
+      }
+    });
+
     server.registerTool('list_team', {
       title: 'List team members',
       description: 'List the people in the workspace with their roles.',
@@ -214,11 +252,11 @@ function mountMcp(app, core) {
   app.post('/api/v1/messages', (req, res) => {
     const bot = auth(req, res);
     if (!bot) return;
-    const { channel, text: body, thread_id } = req.body || {};
+    const { channel, text: body, thread_id, tasks, pin } = req.body || {};
     const c = resolveChannel(bot, channel);
     if (!c) return res.status(404).json({ error: `Channel "${channel}" not found.` });
     try {
-      const m = core.postMessage(bot, c.id, body, thread_id);
+      const m = core.postMessage(bot, c.id, body, thread_id, { tasks, pin: !!pin });
       res.json({ ok: true, message_id: m.id, channel: core.displayName(c) });
     } catch (e) {
       res.status(400).json({ error: e.message });

@@ -155,7 +155,7 @@
     s = s.replace(/\*\*([^*\n]+)\*\*|\*([^*\n]+)\*/g, (_, a, b) => `<strong>${a || b}</strong>`);
     s = s.replace(/(^|[\s(])_([^_\n]+)_(?=$|[\s).,!?])/g, '$1<em>$2</em>');
     s = s.replace(/~([^~\n]+)~/g, '<del>$1</del>');
-    s = s.replace(/^&gt; ?(.*)$/gm, '<blockquote>$1</blockquote>');
+    s = s.replace(/^&gt; ?(.*)$\n?/gm, '<blockquote>$1</blockquote>');
     const names = Object.values(S.users).flatMap((u) => [u.name, u.name.split(' ')[0]]).sort((a, b) => b.length - a.length).map((n) => esc(n).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
     const re = new RegExp(`@(here|channel|everyone${names.length ? '|' + names.join('|') : ''})\\b`, 'gi');
     s = s.replace(re, '<span class="mention">@$1</span>');
@@ -246,7 +246,7 @@
         if (r.error) return;
         S.messages[id] = r.messages;
         S.hasMore[id] = r.hasMore;
-        if (S.current === id) { renderMessages(); scrollBottom(); }
+        if (S.current === id) { renderMessages(); scrollBottom(); renderHeader(); }
       });
     } else { renderMessages(); scrollBottom(); }
     if (window.innerWidth > 760) $('#composer-input').focus();
@@ -272,6 +272,8 @@
     const other = c.isDM && S.users[c.members.find((x) => x !== S.me.id)];
     $('#chan-topic').textContent = c.isDM ? (other ? [other.title, other.status].filter(Boolean).join(' · ') : '') : (c.topic || 'Add a topic');
     $('#members-btn').textContent = `👥 ${c.members.length}`;
+    const pinCount = (S.messages[c.id] || []).filter((m) => m.pinned && !m.deleted).length;
+    $('#pins-btn').innerHTML = pinCount ? `📌<span class="pin-count">${pinCount}</span>` : '📌';
   }
   $('#chan-title').addEventListener('click', (e) => { const b = e.target.closest('[data-open]'); if (b && S.channels[b.dataset.open]) openChannel(b.dataset.open); });
   $('#bell-btn').addEventListener('click', () => channelNotifyModal(S.channels[S.current]));
@@ -366,11 +368,28 @@
         ${m.pinned && !m.deleted ? '<div class="pin-flag">📌 Pinned</div>' : ''}
         <div class="msg-head"><span class="msg-author" data-user="${m.userId}">${esc(u?.name || 'Unknown')}</span>${u?.isBot ? `<span class="tag">${u.integration ? 'App' : 'AI'}</span>` : ''}${u?.title ? `<span class="msg-role">${esc(u.title)}</span>` : ''}<span class="msg-time" title="${new Date(m.ts).toLocaleString()}">${fmtTime(m.ts)}</span></div>
         ${body}
+        ${m.tasks && !m.deleted ? tasksHTML(m) : ''}
         ${reactions || thread ? `<div class="reactions">${reactions}${reactions ? '<button class="reaction add" data-act="react" title="Add reaction">＋</button>' : ''}</div>${thread}` : ''}
       </div>
       ${actions}
     </div>`;
   }
+  function tasksHTML(m) {
+    const done = m.tasks.filter((t) => t.doneBy).length;
+    const rows = m.tasks.map((t) => {
+      const who = (id) => (id === S.me.id ? 'You' : S.users[id]?.name.split(' ')[0] || 'Someone');
+      let right;
+      if (t.doneBy) right = `<span class="task-who done">✓ ${esc(who(t.doneBy))}</span>`;
+      else if (t.claimedBy === S.me.id) right = `<button class="task-btn ghost" data-task="${t.id}" data-ta="unclaim">Release</button>`;
+      else if (t.claimedBy) right = `<span class="task-who">🙋 ${esc(who(t.claimedBy))}</span>`;
+      else right = `<button class="task-btn" data-task="${t.id}" data-ta="claim">I'll take it</button>`;
+      return `<div class="task${t.doneBy ? ' is-done' : ''}${t.claimedBy && !t.doneBy ? ' is-claimed' : ''}">
+        <button class="task-check" data-task="${t.id}" data-ta="${t.doneBy ? 'undo' : 'done'}" aria-label="${t.doneBy ? 'Reopen' : 'Mark done'}">${t.doneBy ? '✓' : ''}</button>
+        <span class="task-label">${esc(t.label)}</span>${right}</div>`;
+    }).join('');
+    return `<div class="tasks"><div class="tasks-head">First steps <span>${done}/${m.tasks.length} done</span></div>${rows}</div>`;
+  }
+
   function findMsg(id) {
     for (const list of Object.values(S.messages)) { const m = list.find((x) => x.id === id); if (m) return m; }
     if (S.thread?.id === id) return S.thread;
@@ -382,6 +401,11 @@
     if (author && author.dataset.user !== S.me.id) return openDM(author.dataset.user);
     if (!el) return;
     const id = el.dataset.mid;
+    const tk = e.target.closest('[data-task]');
+    if (tk) {
+      tk.disabled = true;
+      return S.socket.emit('task:update', { messageId: id, taskId: tk.dataset.task, action: tk.dataset.ta }, (res) => { if (res?.error) { toast(res.error); tk.disabled = false; } });
+    }
     const r = e.target.closest('[data-react]');
     if (r) return S.socket.emit('reaction', { messageId: id, emoji: r.dataset.react });
     const t = e.target.closest('[data-thread]');
@@ -423,6 +447,7 @@
       if (S.messages[m.channelId]) S.messages[m.channelId].push(m);
       if (m.channelId === S.current) {
         renderMessages();
+        renderHeader();
         scrollBottom(m.userId === S.me.id ? true : false);
         if (document.hasFocus()) S.socket.emit('read', { channelId: m.channelId });
       } else if (m.userId !== S.me.id) {
@@ -440,7 +465,7 @@
     if (S.thread?.id === m.id) S.thread = { ...S.thread, ...m };
     const ti = S.threadReplies.findIndex((x) => x.id === m.id);
     if (ti >= 0) S.threadReplies[ti] = { ...S.threadReplies[ti], ...m };
-    if (m.channelId === S.current) { const box = $('#messages'); const top = box.scrollTop; renderMessages(); box.scrollTop = top; }
+    if (m.channelId === S.current) { const box = $('#messages'); const top = box.scrollTop; renderMessages(); box.scrollTop = top; renderHeader(); }
     renderThread();
   }
   // ---------- Notifications: levels, sounds, pause ----------
@@ -580,6 +605,16 @@
             ${st.connected ? '<button class="btn" id="fub-test">Post a test lead</button><button class="btn danger" id="fub-off">Disconnect</button>' : ''}
           </div>
         </div>
+        ${st.connected ? `<div class="set-block">
+          <div class="set-title">First steps for new leads</div>
+          <div class="sub" style="margin-bottom:8px">Each new lead is posted with these steps. Teammates tap <strong>I'll take it</strong> to claim one and tick it off when done. One step per line; <code>{first}</code>, <code>{name}</code> and <code>{address}</code> are filled in automatically.</div>
+          ${[['seller', '🏡 Seller leads'], ['buyer', '🔑 Buyer leads'], ['other', '🆕 Other leads']].map(([k, label]) => `
+            <div class="pb">
+              <div class="pb-head"><strong>${label}</strong><label class="pb-pin"><input type="checkbox" data-pin="${k}" ${st.playbooks?.[k]?.pin ? 'checked' : ''}> Pin until done</label></div>
+              <textarea data-steps="${k}" rows="3">${esc((st.playbooks?.[k]?.steps || []).join('\n'))}</textarea>
+            </div>`).join('')}
+          <div class="modal-actions" style="justify-content:flex-start"><button class="btn-gold" id="pb-save">Save first steps</button></div>
+        </div>` : ''}
         <div class="set-block">
           <div class="set-title">Other apps (Zapier, Make, website forms)</div>
           <div class="sub">Any app can post into Kaizen HQ with a key from <strong>AI & API</strong>:</div>
@@ -601,6 +636,11 @@
         if (e.target.id === 'fub-test') {
           e.target.disabled = true; e.target.textContent = 'Posting…';
           S.socket.emit('fub:test', {}, (res) => { if (res.error) err(res.error); else toast('Test lead posted'); renderIntegrations(body); });
+        }
+        if (e.target.id === 'pb-save') {
+          const pbs = {};
+          for (const k of ['seller', 'buyer', 'other']) pbs[k] = { pin: body.querySelector(`[data-pin="${k}"]`).checked, steps: body.querySelector(`[data-steps="${k}"]`).value };
+          S.socket.emit('fub:playbooks', { playbooks: pbs }, (res) => { if (res.error) err(res.error); else toast('First steps saved'); });
         }
         if (e.target.id === 'fub-off' && confirm('Disconnect Follow Up Boss? New leads will stop posting.')) {
           S.socket.emit('fub:disconnect', {}, () => { toast('Disconnected'); renderIntegrations(body); });
@@ -929,7 +969,7 @@
   function resultRow(m) {
     const c = S.channels[m.channelId];
     const u = S.users[m.userId];
-    return `<div class="result" data-goto="${m.parentId || m.id}" data-chan="${m.channelId}"><div class="meta">${c ? (c.isDM ? esc(channelLabel(c)) : '#' + esc(fullLabel(c))) : ''} · ${esc(u?.name || '')} · ${fmtDay(m.ts)} ${fmtTime(m.ts)}</div><div class="msg-text">${format(m.text)}</div></div>`;
+    return `<div class="result" data-goto="${m.parentId || m.id}" data-chan="${m.channelId}"><div class="meta">${c ? (c.isDM ? esc(channelLabel(c)) : '#' + esc(fullLabel(c))) : ''} · ${esc(u?.name || '')} · ${fmtDay(m.ts)} ${fmtTime(m.ts)}</div><div class="msg-text">${format(m.text)}</div>${m.tasks ? `<div class="meta" style="margin-top:4px">First steps: ${m.tasks.filter((t) => t.doneBy).length}/${m.tasks.length} done${m.tasks.some((t) => !t.claimedBy && !t.doneBy) ? ' · <strong>needs an owner</strong>' : ''}</div>` : ''}</div>`;
   }
   function bindResults() {
     $('#modal-body').onclick = (e) => {
