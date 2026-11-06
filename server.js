@@ -97,6 +97,8 @@ const app = express();
 app.use(express.json({ limit: '100kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
+app.get('/healthz', (req, res) => res.send('ok'));
+
 app.get('/api/config', (req, res) => {
   res.json({ workspace: WORKSPACE_NAME, inviteRequired: !!INVITE_CODE, hasUsers: Object.keys(db.users).length > 0 });
 });

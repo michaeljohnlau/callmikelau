@@ -1,0 +1,26 @@
+# One-click setup for Render (https://render.com).
+# Creates the web service plus a persistent disk so messages, accounts and
+# push-notification keys survive restarts and redeploys.
+services:
+  - type: web
+    name: kaizen-hq
+    runtime: node
+    plan: starter            # paid plan required for a persistent disk (~US$7/month)
+    region: ohio             # closest Render region to Toronto
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATA_DIR
+        value: /var/data
+      - key: WORKSPACE_NAME
+        value: Kaizen HQ
+      - key: INVITE_CODE
+        sync: false          # Render asks you to type this in during setup
+    disk:
+      name: kaizen-data
+      mountPath: /var/data
+      sizeGB: 1
