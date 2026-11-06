@@ -11,6 +11,8 @@
   const S = {
     socket: null, me: null, users: {}, online: new Set(), channels: {}, browse: {},
     current: null, messages: {}, hasMore: {}, thread: null, threadReplies: [], typing: {},
+    prefs: { notify: {}, sound: 'chime', pauseUntil: 0 },
+    collapsed: new Set(JSON.parse(store.get('kaizenhq_collapsed') || '[]')),
   };
   const EMOJI = ['👍', '🎉', '🔥', '🙌', '❤️', '😂', '👀', '✅', '🏡', '🔑', '💯', '🙏', '😮', '💪', '📈', '⭐'];
 
@@ -67,6 +69,7 @@
     });
     socket.on('init', (d) => {
       S.me = d.me;
+      S.prefs = d.prefs || S.prefs;
       S.users = Object.fromEntries(d.users.map((u) => [u.id, u]));
       S.online = new Set(d.online);
       S.channels = Object.fromEntries(d.channels.map((c) => [c.id, c]));
@@ -87,12 +90,26 @@
     });
     socket.on('presence', ({ userId, online }) => { online ? S.online.add(userId) : S.online.delete(userId); renderSidebar(); });
     socket.on('user:new', (u) => { S.users[u.id] = u; renderSidebar(); });
+    socket.on('user:remove', ({ id }) => { delete S.users[id]; renderSidebar(); });
+    socket.on('prefs', (p) => { S.prefs = p; renderSidebar(); renderHeader(); });
+    socket.on('channel:archived', ({ channelId, archived }) => {
+      const c = S.channels[channelId] || S.browse[channelId];
+      if (!c) return;
+      c.archived = archived;
+      renderSidebar();
+      if (channelId === S.current) { renderHeader(); updateComposer(); }
+    });
     socket.on('user:update', (u) => { S.users[u.id] = u; if (u.id === S.me.id) { S.me = u; renderMe(); } renderSidebar(); renderMessages(); renderThread(); });
     socket.on('message:new', onNewMessage);
     socket.on('message:update', onUpdateMessage);
     socket.on('typing', onTyping);
     socket.on('channel:joined', (c) => { S.channels[c.id] = c; delete S.browse[c.id]; renderSidebar(); });
-    socket.on('channel:left', (c) => { delete S.channels[c.channelId]; S.browse[c.channelId] = { id: c.channelId, name: c.name, topic: c.topic, memberCount: c.memberCount }; if (S.current === c.channelId) openChannel(Object.keys(S.channels)[0]); renderSidebar(); });
+    socket.on('channel:left', (c) => {
+      delete S.channels[c.channelId];
+      S.browse[c.channelId] = { ...c, id: c.channelId };
+      if (S.current === c.channelId) openChannel((Object.values(S.channels).find((x) => x.name === 'general') || Object.values(S.channels)[0])?.id);
+      renderSidebar();
+    });
     socket.on('channel:available', (c) => { if (!S.channels[c.id]) S.browse[c.id] = c; });
     socket.on('channel:members', ({ channelId, members }) => { if (S.channels[channelId]) { S.channels[channelId].members = members; if (channelId === S.current) renderHeader(); } });
     socket.on('channel:topic', ({ channelId, topic }) => { if (S.channels[channelId]) { S.channels[channelId].topic = topic; if (channelId === S.current) renderHeader(); } });
@@ -103,6 +120,7 @@
   const initials = (n) => n.split(/\s+/).map((p) => p[0]).slice(0, 2).join('').toUpperCase();
   function avatar(u, cls = '') {
     if (!u) return `<div class="avatar ${cls}" style="background:#ccc">?</div>`;
+    if (u.isBot) return `<div class="avatar bot ${cls}">✦</div>`;
     return `<div class="avatar ${cls}" style="background:${u.color}">${esc(initials(u.name))}</div>`;
   }
   const fmtTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -113,8 +131,14 @@
     if (d.toDateString() === y.toDateString()) return 'Yesterday';
     return d.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric', year: d.getFullYear() !== t.getFullYear() ? 'numeric' : undefined });
   }
+  // Full name for headers and notifications, e.g. "listings › 24 Juniper Crescent".
+  function fullLabel(c) {
+    if (c.isDM) return channelLabel(c);
+    const parent = c.parentId && (S.channels[c.parentId] || S.browse[c.parentId]);
+    return parent ? `${parent.name} › ${c.label || c.name}` : c.name;
+  }
   function channelLabel(c) {
-    if (!c.isDM) return c.name;
+    if (!c.isDM) return c.label || c.name;
     const others = c.members.filter((id) => id !== S.me.id);
     if (!others.length) return (S.me.name) + ' (you)';
     return others.map((id) => S.users[id]?.name || 'Unknown').join(', ');
@@ -148,26 +172,51 @@
     $('#me-status').textContent = S.me.status || S.me.title || 'Set a status';
   }
   function renderSidebar() {
-    const chans = Object.values(S.channels).filter((c) => !c.isDM).sort((a, b) => a.name.localeCompare(b.name));
-    const dms = Object.values(S.channels).filter((c) => c.isDM).sort((a, b) => channelLabel(a).localeCompare(channelLabel(b)));
-    const item = (c) => {
-      const active = c.id === S.current ? ' active' : '';
-      const unread = c.unread && c.id !== S.current ? ' unread' : '';
+    if (!S.me) return;
+    const all = Object.values(S.channels).filter((c) => !c.archived || c.id === S.current);
+    const byName = (a, b) => channelLabel(a).localeCompare(channelLabel(b), undefined, { numeric: true });
+    const tops = all.filter((c) => !c.isDM && !c.parentId).sort(byName);
+    const dms = all.filter((c) => c.isDM).sort(byName);
+    const childrenOf = (id) => all.filter((c) => c.parentId === id).sort(byName);
+    const muted = (c) => levelOf(c) === 'mute';
+    const badgeFor = (c) => (c.id === S.current || muted(c) ? 0 : c.isDM ? c.unread : c.mentions) || 0;
+    const item = (c, { child = false, kids = [] } = {}) => {
+      const isOpen = !S.collapsed.has(c.id);
+      const hidden = kids.length && !isOpen ? kids : [];
+      const unreadHere = (c.unread && c.id !== S.current && !muted(c)) || hidden.some((k) => k.unread && !muted(k));
+      const cls = ['side-item', child && 'child', c.id === S.current && 'active', unreadHere && 'unread', muted(c) && 'muted-chan', c.archived && 'archived'].filter(Boolean).join(' ');
       let icon = '<span class="hash">#</span>';
       if (c.isDM) {
         const other = c.members.find((id) => id !== S.me.id) || S.me.id;
-        icon = `<span class="dot${S.online.has(other) ? ' on' : ''}"></span>`;
-      }
-      const badgeCount = c.isDM ? c.unread : c.mentions;
-      const badge = badgeCount && c.id !== S.current ? `<span class="badge">${badgeCount}</span>` : '';
-      return `<li class="side-item${active}${unread}" data-id="${c.id}">${icon}<span class="label">${esc(channelLabel(c))}</span>${badge}</li>`;
+        icon = S.users[other]?.isBot ? '<span class="hash">✦</span>' : `<span class="dot${S.online.has(other) ? ' on' : ''}"></span>`;
+      } else if (child) icon = '<span class="hash sub">⌂</span>';
+      const caret = kids.length ? `<button class="caret${isOpen ? ' open' : ''}" data-toggle="${c.id}" aria-label="${isOpen ? 'Collapse' : 'Expand'}">▸</button>` : '';
+      const count = badgeFor(c) + hidden.reduce((n, k) => n + badgeFor(k), 0);
+      const badge = count ? `<span class="badge">${count}</span>` : '';
+      const bell = muted(c) ? '<span class="mute-icon" title="Muted">🔕</span>' : '';
+      return `<li class="${cls}" data-id="${c.id}">${icon}<span class="label">${esc(channelLabel(c))}</span>${bell}${badge}${caret}</li>`;
     };
-    $('#channel-list').innerHTML = chans.map(item).join('');
-    $('#dm-list').innerHTML = dms.map(item).join('') || '<li class="side-item muted" id="dm-empty"><span class="label">Start a conversation</span></li>';
-    const total = Object.values(S.channels).reduce((n, c) => n + (c.id !== S.current ? (c.isDM ? c.unread : c.mentions) || 0 : 0), 0);
+    $('#channel-list').innerHTML = tops.map((c) => {
+      const kids = childrenOf(c.id);
+      const open = !S.collapsed.has(c.id);
+      return item(c, { kids }) + (kids.length && open ? kids.map((k) => item(k, { child: true })).join('') : '');
+    }).join('');
+    $('#dm-list').innerHTML = dms.map((c) => item(c)).join('') || '<li class="side-item muted" id="dm-empty"><span class="label">Start a conversation</span></li>';
+    const total = Object.values(S.channels).reduce((n, c) => n + badgeFor(c), 0);
     document.title = (total ? `(${total}) ` : '') + ($('#ws-name').textContent || 'Kaizen HQ');
+    if (navigator.setAppBadge) (total ? navigator.setAppBadge(total) : navigator.clearAppBadge()).catch(() => {});
   }
-  $('#channel-list').addEventListener('click', (e) => { const li = e.target.closest('[data-id]'); if (li) openChannel(li.dataset.id); });
+  $('#channel-list').addEventListener('click', (e) => {
+    const t = e.target.closest('[data-toggle]');
+    if (t) {
+      e.stopPropagation();
+      S.collapsed.has(t.dataset.toggle) ? S.collapsed.delete(t.dataset.toggle) : S.collapsed.add(t.dataset.toggle);
+      store.set('kaizenhq_collapsed', JSON.stringify([...S.collapsed]));
+      return renderSidebar();
+    }
+    const li = e.target.closest('[data-id]');
+    if (li) openChannel(li.dataset.id);
+  });
   $('#dm-list').addEventListener('click', (e) => { const li = e.target.closest('[data-id]'); if (li) openChannel(li.dataset.id); else if (e.target.closest('#dm-empty')) newDM(); });
   $('#menu-btn').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
 
@@ -184,7 +233,8 @@
     renderHeader();
     renderTyping();
     const c = S.channels[id];
-    $('#composer-input').placeholder = c.isDM ? `Message ${channelLabel(c)}` : `Message #${c.name}`;
+    if (c.parentId) { S.collapsed.delete(c.parentId); }
+    updateComposer();
     if (!S.messages[id]) {
       $('#messages').innerHTML = '';
       S.socket.emit('history', { channelId: id }, (r) => {
@@ -196,14 +246,30 @@
     } else { renderMessages(); scrollBottom(); }
     if (window.innerWidth > 760) $('#composer-input').focus();
   }
+  function updateComposer() {
+    const c = S.channels[S.current];
+    if (!c) return;
+    const input = $('#composer-input');
+    input.disabled = !!c.archived;
+    input.placeholder = c.archived ? 'This channel is archived. Open channel details to unarchive it.' : c.isDM ? `Message ${channelLabel(c)}` : `Message #${channelLabel(c)}`;
+  }
   function renderHeader() {
     const c = S.channels[S.current];
     if (!c) return;
-    $('#chan-title').textContent = c.isDM ? channelLabel(c) : '# ' + c.name;
+    $('#chan-title').innerHTML = c.isDM ? esc(channelLabel(c)) : c.parentId
+      ? `<span class="crumb" data-open="${c.parentId}"># ${esc((S.channels[c.parentId] || S.browse[c.parentId] || {}).name || '')}</span> <span class="crumb-sep">›</span> ${esc(c.label || c.name)}${c.archived ? ' <span class="tag">Archived</span>' : ''}`
+      : `# ${esc(c.name)}${c.archived ? ' <span class="tag">Archived</span>' : ''}`;
+    const lvl = levelOf(c);
+    const bell = $('#bell-btn');
+    bell.textContent = lvl === 'mute' ? '🔕' : '🔔';
+    bell.classList.toggle('dim', lvl === 'mute');
+    bell.title = `Notifications: ${LEVEL_TEXT[lvl]}`;
     const other = c.isDM && S.users[c.members.find((x) => x !== S.me.id)];
     $('#chan-topic').textContent = c.isDM ? (other ? [other.title, other.status].filter(Boolean).join(' · ') : '') : (c.topic || 'Add a topic');
     $('#members-btn').textContent = `👥 ${c.members.length}`;
   }
+  $('#chan-title').addEventListener('click', (e) => { const b = e.target.closest('[data-open]'); if (b && S.channels[b.dataset.open]) openChannel(b.dataset.open); });
+  $('#bell-btn').addEventListener('click', () => channelNotifyModal(S.channels[S.current]));
   $('#chan-topic').addEventListener('click', () => {
     const c = S.channels[S.current];
     if (!c || c.isDM) return;
@@ -215,13 +281,24 @@
   $('#members-btn').addEventListener('click', () => {
     const c = S.channels[S.current];
     const rows = c.members.map((id) => S.users[id]).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name)).map((u) =>
-      `<div class="list-row" data-user="${u.id}">${avatar(u)}<div class="grow"><div><strong>${esc(u.name)}</strong>${u.id === S.me.id ? ' <span class="muted">(you)</span>' : ''}</div><div class="sub">${esc(u.title || '')}${S.online.has(u.id) ? ' · <span style="color:var(--online)">Active</span>' : ''}</div></div></div>`).join('');
-    const leave = !c.isDM && c.name !== 'general' ? `<div class="modal-actions"><button class="btn" id="leave-chan">Leave #${esc(c.name)}</button></div>` : '';
-    modal(c.isDM ? 'Conversation' : `#${c.name}`, rows + leave);
+      `<div class="list-row" data-user="${u.id}">${avatar(u)}<div class="grow"><div><strong>${esc(u.name)}</strong>${u.isBot ? ' <span class="tag">AI</span>' : ''}${u.id === S.me.id ? ' <span class="muted">(you)</span>' : ''}</div><div class="sub">${esc(u.title || '')}${S.online.has(u.id) ? ' · <span style="color:var(--online)">Active</span>' : ''}</div></div></div>`).join('');
+    const canArchive = !c.isDM && !c.isDefault && (c.createdBy === S.me.id || S.me.isAdmin);
+    const actions = [];
+    if (!c.isDM && !c.parentId) actions.push(`<button class="btn" id="add-sub">＋ Add sub-channel</button>`);
+    if (!c.isDM) actions.push(`<button class="btn" id="chan-notify">🔔 Notifications: ${LEVEL_TEXT[levelOf(c)]}</button>`);
+    if (canArchive) actions.push(`<button class="btn" id="archive-chan">${c.archived ? 'Unarchive' : '🗄 Archive'}</button>`);
+    if (!c.isDM && c.name !== 'general' && !c.isDefault) actions.push(`<button class="btn" id="leave-chan">Leave</button>`);
+    modal(c.isDM ? 'Conversation' : `#${fullLabel(c)}`, (actions.length ? `<div class="detail-actions">${actions.join('')}</div>` : '') + `<h4 class="modal-sub">${c.members.length} member${c.members.length === 1 ? '' : 's'}</h4>` + rows);
     $('#modal-body').onclick = (e) => {
       const r = e.target.closest('[data-user]');
       if (r && r.dataset.user !== S.me.id) { closeModal(); openDM(r.dataset.user); }
       if (e.target.id === 'leave-chan') { S.socket.emit('channel:leave', { channelId: c.id }); closeModal(); }
+      if (e.target.id === 'add-sub') channelModal(c.id);
+      if (e.target.id === 'chan-notify') channelNotifyModal(c);
+      if (e.target.id === 'archive-chan') {
+        if (!c.archived && !confirm(`Archive #${fullLabel(c)}? It will be hidden from the sidebar, but messages stay searchable and you can unarchive it any time.`)) return;
+        S.socket.emit('channel:archive', { channelId: c.id, archived: !c.archived }, (res) => { if (res.error) toast(res.error); else { closeModal(); toast(c.archived ? 'Channel archived' : 'Channel unarchived'); } });
+      }
     };
   });
   $('#pins-btn').addEventListener('click', () => {
@@ -237,7 +314,7 @@
     const c = S.channels[S.current];
     let html = '';
     if (S.hasMore[S.current]) html += '<div class="load-more"><button class="chip" id="load-more">Load earlier messages</button></div>';
-    else html += `<div class="empty"><h3>${c.isDM ? esc(channelLabel(c)) : '#' + esc(c.name)}</h3><div>${c.isDM ? 'This is the start of your conversation.' : esc(c.topic || 'This is the very beginning of the channel.')}</div></div>`;
+    else html += `<div class="empty"><h3>${c.isDM ? esc(channelLabel(c)) : (c.parentId ? '' : '#') + esc(channelLabel(c))}</h3><div>${c.isDM ? 'This is the start of your conversation.' : esc(c.topic || 'This is the very beginning of the channel.')}</div></div>`;
     let prev = null;
     for (const m of list) {
       const day = fmtDay(m.ts);
@@ -282,7 +359,7 @@
       <div class="msg-gutter">${avatar(u, 'lg')}<div class="time-hover">${fmtTime(m.ts).replace(/\s?[AP]M/i, '')}</div></div>
       <div class="msg-body">
         ${m.pinned && !m.deleted ? '<div class="pin-flag">📌 Pinned</div>' : ''}
-        <div class="msg-head"><span class="msg-author" data-user="${m.userId}">${esc(u?.name || 'Unknown')}</span>${u?.title ? `<span class="msg-role">${esc(u.title)}</span>` : ''}<span class="msg-time" title="${new Date(m.ts).toLocaleString()}">${fmtTime(m.ts)}</span></div>
+        <div class="msg-head"><span class="msg-author" data-user="${m.userId}">${esc(u?.name || 'Unknown')}</span>${u?.isBot ? '<span class="tag">AI</span>' : ''}${u?.title ? `<span class="msg-role">${esc(u.title)}</span>` : ''}<span class="msg-time" title="${new Date(m.ts).toLocaleString()}">${fmtTime(m.ts)}</span></div>
         ${body}
         ${reactions || thread ? `<div class="reactions">${reactions}${reactions ? '<button class="reaction add" data-act="react" title="Add reaction">＋</button>' : ''}</div>${thread}` : ''}
       </div>
@@ -349,7 +426,7 @@
         renderSidebar();
       }
     }
-    if (m.userId !== S.me.id && (c.isDM || mentionsMe(m)) && (!document.hasFocus() || m.channelId !== S.current)) notify(m, c);
+    if (shouldAlert(m, c)) alert(m, c);
     clearTypingFor(m.channelId, m.userId);
   }
   function onUpdateMessage(m) {
@@ -361,14 +438,214 @@
     if (m.channelId === S.current) { const box = $('#messages'); const top = box.scrollTop; renderMessages(); box.scrollTop = top; }
     renderThread();
   }
-  function notify(m, c) {
-    if (!('Notification' in window) || Notification.permission !== 'granted') return;
-    if (document.hidden && S.pushOn) return; // the server's push notification covers this
-    if (navigator.serviceWorker?.controller && isMobile) return; // phones only show notifications via push
-    const u = S.users[m.userId];
-    const n = new Notification(c.isDM ? u?.name : `${u?.name} in #${c.name}`, { body: m.text.slice(0, 140), tag: m.channelId });
-    n.onclick = () => { window.focus(); openChannel(m.channelId); n.close(); };
+  // ---------- Notifications: levels, sounds, pause ----------
+  const LEVEL_TEXT = { all: 'All new messages', mentions: 'Mentions & replies only', mute: 'Muted' };
+  function levelOf(c) {
+    if (!c) return 'all';
+    const n = S.prefs.notify || {};
+    return n[c.id] || (c.parentId && n[c.parentId]) || 'all';
   }
+  const paused = () => (S.prefs.pauseUntil || 0) > Date.now();
+  // Same rules as the server uses for push notifications.
+  function shouldAlert(m, c) {
+    if (m.userId === S.me.id || paused()) return false;
+    const lvl = levelOf(c);
+    if (lvl === 'mute') return false;
+    if (m.parentId) {
+      const mine = (S.thread?.id === m.parentId && (S.thread.userId === S.me.id || S.threadReplies.some((r) => r.userId === S.me.id)))
+        || (S.messages[m.channelId] || []).some((x) => x.id === m.parentId && x.userId === S.me.id);
+      return mine || mentionsMe(m);
+    }
+    return c.isDM || mentionsMe(m) || lvl === 'all';
+  }
+  function alert(m, c) {
+    const lookingAtIt = !document.hidden && document.hasFocus() && m.channelId === S.current && !m.parentId;
+    if (!lookingAtIt || !document.hidden) playSound(S.prefs.sound, lookingAtIt ? 0.35 : 1);
+    if (!document.hidden) return; // the app is on screen: sound + unread badge is enough
+    if (S.pushOn) return; // the server's push notification covers this
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    const u = S.users[m.userId];
+    try {
+      const n = new Notification(c.isDM ? u?.name : `${u?.name} in #${fullLabel(c)}`, { body: m.text.slice(0, 140), tag: m.channelId, icon: '/icons/icon-192.png' });
+      n.onclick = () => { window.focus(); openChannel(m.channelId); n.close(); };
+    } catch {}
+  }
+
+  // Sounds are generated in the browser, so there are no audio files to load.
+  let audioCtx = null;
+  const unlockAudio = () => {
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+    } catch {}
+  };
+  ['pointerdown', 'keydown', 'touchend'].forEach((ev) => document.addEventListener(ev, unlockAudio, { passive: true }));
+  const SOUNDS = {
+    chime: [[880, 0, 0.5, 'sine'], [1318.5, 0.12, 0.7, 'sine']],
+    ding: [[1046.5, 0, 0.9, 'triangle']],
+    pop: [[620, 0, 0.09, 'sine', 180]],
+    marimba: [[523.25, 0, 0.25, 'sine'], [659.25, 0.08, 0.25, 'sine'], [783.99, 0.16, 0.45, 'sine']],
+    soft: [[659.25, 0, 1.1, 'sine']],
+  };
+  const SOUND_NAMES = { chime: 'Chime', ding: 'Ding', pop: 'Pop', marimba: 'Marimba', soft: 'Soft', none: 'None (silent)' };
+  function playSound(name, volume = 1) {
+    const notes = SOUNDS[name];
+    if (!notes) return;
+    unlockAudio();
+    if (!audioCtx || audioCtx.state !== 'running') return;
+    const t0 = audioCtx.currentTime + 0.01;
+    for (const [freq, at, dur, type, endFreq] of notes) {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq, t0 + at);
+      if (endFreq) osc.frequency.exponentialRampToValueAtTime(endFreq, t0 + at + dur);
+      const peak = (name === 'soft' ? 0.12 : 0.22) * volume;
+      gain.gain.setValueAtTime(0.0001, t0 + at);
+      gain.gain.exponentialRampToValueAtTime(peak, t0 + at + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + at + dur);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(t0 + at);
+      osc.stop(t0 + at + dur + 0.05);
+    }
+    if (navigator.vibrate && isMobile && document.hidden === false && volume === 1) navigator.vibrate(60);
+  }
+
+  function savePrefs(patch) {
+    S.socket.emit('prefs:update', patch, (r) => { if (r?.prefs) { S.prefs = r.prefs; renderSidebar(); renderHeader(); } });
+  }
+
+  function channelNotifyModal(c) {
+    if (!c) return;
+    const lvl = (S.prefs.notify || {})[c.id];
+    const inherited = !lvl && c.parentId && (S.prefs.notify || {})[c.parentId];
+    const opt = (v, desc) => `<label class="radio-row"><input type="radio" name="lvl" value="${v}" ${levelOf(c) === v ? 'checked' : ''}><div><strong>${LEVEL_TEXT[v]}</strong><div class="sub">${desc}</div></div></label>`;
+    modal(`Notify me about #${fullLabel(c)}`, `
+      ${opt('all', 'Every new message in this channel, plus @mentions and replies to your threads.')}
+      ${opt('mentions', 'Only when someone @mentions you, uses @here, or replies to a thread you are in.')}
+      ${opt('mute', 'No notifications or sounds. Unread messages still show in the sidebar, just quietly.')}
+      ${inherited ? `<p class="muted small">Following the setting on #${esc(S.channels[c.parentId]?.name || '')}.</p>` : ''}
+      ${!c.parentId && Object.values(S.channels).some((x) => x.parentId === c.id) ? '<p class="muted small">Sub-channels follow this setting unless you change them individually.</p>' : ''}
+      <div class="modal-actions"><button class="btn" id="open-settings">All notification settings</button><button class="btn-gold" data-close>Done</button></div>`);
+    $('#modal-body').onchange = (e) => { if (e.target.name === 'lvl') savePrefs({ channelId: c.id, level: e.target.value }); };
+    $('#open-settings').onclick = () => openSettings('notifications');
+  }
+
+  // ---------- Settings (notifications, profile, AI assistants) ----------
+  function openSettings(tab = 'notifications') {
+    const tabs = [['notifications', 'Notifications'], ['profile', 'Profile'], ...(S.me.isAdmin ? [['ai', 'AI assistants']] : [])];
+    modal('Settings', `<div class="tabs">${tabs.map(([k, t]) => `<button data-tab="${k}" class="${k === tab ? 'active' : ''}">${t}</button>`).join('')}</div><div id="settings-body"></div>`);
+    $('.tabs', $('#modal-body')).onclick = (e) => { const b = e.target.closest('[data-tab]'); if (b) openSettings(b.dataset.tab); };
+    const body = $('#settings-body');
+    if (tab === 'notifications') renderNotifySettings(body);
+    if (tab === 'profile') renderProfileSettings(body);
+    if (tab === 'ai') renderAISettings(body);
+  }
+
+  function deviceStatus() {
+    if (!pushSupported()) return isIOS && !isStandalone
+      ? { text: 'On iPhone, add Kaizen HQ to your Home Screen first (Share → Add to Home Screen), then open it from there to turn on notifications.', action: null }
+      : { text: 'This browser does not support notifications.', action: null };
+    if (Notification.permission === 'granted') return { text: S.pushOn ? '✅ On for this device, including when the app is closed.' : '✅ Allowed on this device.', action: null };
+    if (Notification.permission === 'denied') return { text: isIOS ? 'Blocked. Turn them on in iPhone Settings → Notifications → Kaizen HQ.' : 'Blocked. Turn them on in your browser or phone settings for this site, then reload.', action: null };
+    return { text: 'Off for this device.', action: 'Turn on notifications' };
+  }
+
+  function renderNotifySettings(body) {
+    const dev = deviceStatus();
+    const pauseText = paused() ? `Paused until ${new Date(S.prefs.pauseUntil).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}` : 'Not paused';
+    const chans = Object.values(S.channels).filter((c) => !c.isDM && !c.archived)
+      .sort((a, b) => fullLabel(a).localeCompare(fullLabel(b), undefined, { numeric: true }));
+    body.innerHTML = `
+      <div class="set-block">
+        <div class="set-title">This device</div>
+        <div class="sub">${dev.text}</div>
+        ${dev.action ? `<button class="btn-gold" id="enable-push" style="margin-top:10px">${dev.action}</button>` : ''}
+        ${'Notification' in window && Notification.permission === 'granted' ? '<button class="btn" id="test-push" style="margin-top:10px">Send a test notification</button>' : ''}
+      </div>
+      <div class="set-block">
+        <div class="set-title">Sound</div>
+        <div class="sound-grid">${Object.entries(SOUND_NAMES).map(([k, n]) => `<button class="sound-opt${S.prefs.sound === k ? ' active' : ''}" data-sound="${k}">${k === 'none' ? '🔇' : '🔊'} ${n}</button>`).join('')}</div>
+        <div class="sub" style="margin-top:6px">Plays while Kaizen HQ is open. When the app is closed, your phone uses its standard notification sound.</div>
+      </div>
+      <div class="set-block">
+        <div class="set-title">Pause notifications</div>
+        <div class="sub" style="margin-bottom:8px">${pauseText}</div>
+        <div class="chip-row">
+          <button class="chip" data-pause="30">30 min</button><button class="chip" data-pause="60">1 hour</button><button class="chip" data-pause="120">2 hours</button>
+          <button class="chip" data-pause="tomorrow">Until tomorrow 8am</button>${paused() ? '<button class="chip" data-pause="0">Resume now</button>' : ''}
+        </div>
+      </div>
+      <div class="set-block">
+        <div class="set-title">Channels</div>
+        ${chans.map((c) => `<div class="chan-pref${c.parentId ? ' child' : ''}"><span class="grow">${c.parentId ? '⌂ ' + esc(channelLabel(c)) : '# ' + esc(c.name)}</span>
+          <select data-chan="${c.id}">${['all', 'mentions', 'mute'].map((v) => `<option value="${v}" ${levelOf(c) === v ? 'selected' : ''}>${v === 'all' ? 'All messages' : v === 'mentions' ? 'Mentions only' : 'Muted'}</option>`).join('')}</select></div>`).join('')}
+        <div class="sub" style="margin-top:6px">Direct messages always notify you unless you mute that conversation.</div>
+      </div>`;
+    body.onclick = async (e) => {
+      const snd = e.target.closest('[data-sound]');
+      if (snd) { unlockAudio(); playSound(snd.dataset.sound); savePrefs({ sound: snd.dataset.sound }); S.prefs.sound = snd.dataset.sound; return renderNotifySettings(body); }
+      const pz = e.target.closest('[data-pause]');
+      if (pz) {
+        let until = 0;
+        if (pz.dataset.pause === 'tomorrow') { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(8, 0, 0, 0); until = d.getTime(); }
+        else if (+pz.dataset.pause) until = Date.now() + +pz.dataset.pause * 60000;
+        S.prefs.pauseUntil = until; savePrefs({ pauseUntil: until });
+        toast(until ? 'Notifications paused' : 'Notifications resumed');
+        return renderNotifySettings(body);
+      }
+      if (e.target.id === 'enable-push') { await enableNotifications(); return renderNotifySettings(body); }
+      if (e.target.id === 'test-push') {
+        const reg = await navigator.serviceWorker?.getRegistration();
+        playSound(S.prefs.sound);
+        const opts = { body: 'Notifications are working. 1% better every day.', icon: '/icons/icon-192.png', badge: '/icons/badge-96.png', tag: 'test' };
+        if (reg) reg.showNotification('Kaizen HQ', opts); else new Notification('Kaizen HQ', opts);
+      }
+    };
+    body.onchange = (e) => { const sel = e.target.closest('[data-chan]'); if (sel) savePrefs({ channelId: sel.dataset.chan, level: sel.value }); };
+  }
+
+  function renderProfileSettings(body) {
+    body.innerHTML = `
+      <div class="field">Full name<input id="p-name" value="${esc(S.me.name)}" maxlength="60"></div>
+      <div class="field">Role<input id="p-title" value="${esc(S.me.title || '')}" maxlength="60" placeholder="e.g. REALTOR®, Team Lead"></div>
+      <div class="field">Status<input id="p-status" value="${esc(S.me.status || '')}" maxlength="80" placeholder="e.g. 🏡 At a listing appointment"></div>
+      <div class="modal-actions"><button class="btn-gold" id="p-save">Save</button></div>`;
+    $('#p-save').onclick = () => { S.socket.emit('profile:update', { name: $('#p-name').value, title: $('#p-title').value, status: $('#p-status').value }); closeModal(); toast('Profile updated'); };
+  }
+
+  function renderAISettings(body) {
+    body.innerHTML = '<p class="muted">Loading…</p>';
+    S.socket.emit('bot:list', {}, (r) => {
+      if (r.error) { body.innerHTML = `<p class="error">${esc(r.error)}</p>`; return; }
+      const url = location.origin + '/mcp';
+      body.innerHTML = `
+        <p class="sub" style="margin-top:0">Connect an AI assistant such as <strong>Grok</strong> through MCP. It can read channels, search, post, reply in threads and create sub-channels. It cannot see direct messages unless someone messages it directly.</p>
+        <div class="set-block"><div class="set-title">Connection URL</div><div class="copy-row"><code>${esc(url)}</code><button class="btn" data-copy="${esc(url)}">Copy</button></div></div>
+        <div class="set-block"><div class="set-title">Connected assistants</div>
+          ${r.bots.length ? r.bots.map((b) => `<div class="list-row"><div class="avatar bot">✦</div><div class="grow"><strong>${esc(b.name)}</strong><div class="sub">Key ${esc(b.keyHint || '')} · ${b.lastUsed ? 'last used ' + fmtDay(b.lastUsed) + ' ' + fmtTime(b.lastUsed) : 'not used yet'}</div></div><button class="btn danger" data-revoke="${b.id}">Remove</button></div>`).join('') : '<p class="muted">None yet.</p>'}
+        </div>
+        <div class="set-block"><div class="set-title">Add an assistant</div>
+          <div class="copy-row"><input id="bot-name" value="Grok" maxlength="40"><button class="btn-gold" id="bot-create">Create key</button></div>
+          <div id="bot-new"></div>
+        </div>`;
+      body.onclick = (e) => {
+        const cp = e.target.closest('[data-copy]');
+        if (cp) { navigator.clipboard?.writeText(cp.dataset.copy).then(() => toast('Copied')); return; }
+        const rv = e.target.closest('[data-revoke]');
+        if (rv && confirm('Remove this assistant? Its key will stop working immediately.')) S.socket.emit('bot:revoke', { botId: rv.dataset.revoke }, () => renderAISettings(body));
+        if (e.target.id === 'bot-create') {
+          S.socket.emit('bot:create', { name: $('#bot-name').value }, (res) => {
+            if (res.error) return toast(res.error);
+            $('#bot-new').innerHTML = `<div class="key-box"><div class="set-title">🔑 ${esc(res.bot.name)}'s key: copy it now, it won't be shown again</div>
+              <div class="copy-row"><code>${esc(res.key)}</code><button class="btn" data-copy="${esc(res.key)}">Copy</button></div>
+              <div class="sub">In Grok (or any MCP client), add a remote MCP server with URL <code>${esc(url)}</code> and header <code>Authorization: Bearer &lt;key&gt;</code>.</div></div>`;
+          });
+        }
+      };
+    });
+  }
+
   window.addEventListener('focus', () => S.current && S.socket?.emit('read', { channelId: S.current }));
 
   // ---------- Typing ----------
@@ -473,7 +750,7 @@
       $('#panel').classList.remove('hidden');
       $('#thread-composer').classList.remove('hidden');
       const c = S.channels[r.parent.channelId];
-      $('#panel-title').innerHTML = `Thread <span class="muted">${c.isDM ? esc(channelLabel(c)) : '#' + esc(c.name)}</span>`;
+      $('#panel-title').innerHTML = `Thread <span class="muted">${c.isDM ? esc(channelLabel(c)) : '#' + esc(fullLabel(c))}</span>`;
       renderThread(true);
       $('#thread-input').focus();
     });
@@ -519,16 +796,29 @@
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k' && S.me) { e.preventDefault(); openSearch(); }
   });
 
-  $('#channel-add').addEventListener('click', () => {
-    const browse = Object.values(S.browse).sort((a, b) => a.name.localeCompare(b.name));
-    modal('Channels', `
-      <div class="field">Create a new channel<input id="new-chan" placeholder="e.g. open-houses" maxlength="40"></div>
+  function channelModal(parentId = '') {
+    const parents = Object.values(S.channels).filter((c) => !c.isDM && !c.parentId && !c.archived).sort((a, b) => a.name.localeCompare(b.name));
+    const browse = Object.values(S.browse).filter((c) => !c.archived).sort((a, b) => fullLabel(a).localeCompare(fullLabel(b)));
+    const archived = [...Object.values(S.channels), ...Object.values(S.browse)].filter((c) => c.archived && !c.isDM).sort((a, b) => fullLabel(a).localeCompare(fullLabel(b)));
+    modal(parentId ? `New sub-channel in #${S.channels[parentId]?.name}` : 'Channels', `
+      <div class="field">Put it under
+        <select id="new-parent"><option value="">Nothing (a main channel)</option>${parents.map((c) => `<option value="${c.id}" ${c.id === parentId ? 'selected' : ''}># ${esc(c.name)}</option>`).join('')}</select>
+      </div>
+      <div class="field"><span id="name-label">${parentId ? 'Address or name' : 'Channel name'}</span><input id="new-chan" placeholder="${parentId ? 'e.g. 24 Juniper Crescent' : 'e.g. open-houses'}" maxlength="80"></div>
       <div class="field"><input id="new-topic" placeholder="What's it for? (optional)" maxlength="200"></div>
+      <p class="sub" id="sub-hint" style="${parentId ? '' : 'display:none'}">Everyone in the main channel is added automatically. Archive it when the deal closes.</p>
       <p class="error" id="chan-err"></p>
-      <div class="modal-actions"><button class="btn-gold" id="create-chan">Create channel</button></div>
-      ${browse.length ? `<h4 style="margin:18px 0 6px">Browse channels</h4>${browse.map((c) => `<div class="list-row" data-join="${c.id}"><div class="grow"><strong># ${esc(c.name)}</strong><div class="sub">${esc(c.topic || '')}${c.topic ? ' · ' : ''}${c.memberCount} member${c.memberCount === 1 ? '' : 's'}</div></div><button class="btn">Join</button></div>`).join('')}` : ''}`);
+      <div class="modal-actions"><button class="btn-gold" id="create-chan">Create</button></div>
+      ${browse.length ? `<h4 class="modal-sub">Browse channels</h4>${browse.map((c) => `<div class="list-row" data-join="${c.id}"><div class="grow"><strong>${c.parentId ? '⌂' : '#'} ${esc(fullLabel(c))}</strong><div class="sub">${esc(c.topic || '')}${c.topic ? ' · ' : ''}${c.memberCount} member${c.memberCount === 1 ? '' : 's'}</div></div><button class="btn">Join</button></div>`).join('')}` : ''}
+      ${archived.length ? `<h4 class="modal-sub">Archived</h4>${archived.map((c) => `<div class="list-row" data-arch="${c.id}"><div class="grow"><strong>🗄 ${esc(fullLabel(c))}</strong><div class="sub">${esc(c.topic || '')}</div></div><button class="btn">${S.channels[c.id] ? 'Open' : 'Join'}</button></div>`).join('')}` : ''}`);
     $('#new-chan').focus();
-    const create = () => S.socket.emit('channel:create', { name: $('#new-chan').value, topic: $('#new-topic').value }, (r) => {
+    $('#new-parent').onchange = (e) => {
+      const sub = !!e.target.value;
+      $('#name-label').textContent = sub ? 'Address or name' : 'Channel name';
+      $('#new-chan').placeholder = sub ? 'e.g. 24 Juniper Crescent' : 'e.g. open-houses';
+      $('#sub-hint').style.display = sub ? '' : 'none';
+    };
+    const create = () => S.socket.emit('channel:create', { name: $('#new-chan').value, topic: $('#new-topic').value, parentId: $('#new-parent').value || null }, (r) => {
       if (r.error) return ($('#chan-err').textContent = r.error);
       closeModal();
       setTimeout(() => openChannel(r.id), 50);
@@ -536,10 +826,14 @@
     $('#create-chan').onclick = create;
     $('#new-chan').onkeydown = (e) => e.key === 'Enter' && create();
     $('#modal-body').onclick = (e) => {
-      const row = e.target.closest('[data-join]');
-      if (row) S.socket.emit('channel:join', { channelId: row.dataset.join }, (r) => { if (r.id) { closeModal(); setTimeout(() => openChannel(r.id), 50); } });
+      const row = e.target.closest('[data-join], [data-arch]');
+      if (!row) return;
+      const id = row.dataset.join || row.dataset.arch;
+      if (S.channels[id]) { closeModal(); return openChannel(id); }
+      S.socket.emit('channel:join', { channelId: id }, (r) => { if (r.id) { closeModal(); setTimeout(() => openChannel(r.id), 80); } });
     };
-  });
+  }
+  $('#channel-add').addEventListener('click', () => channelModal());
 
   function openDM(userId) {
     S.socket.emit('dm:open', { userId }, (r) => { if (r.id) setTimeout(() => openChannel(r.id), 50); });
@@ -549,7 +843,7 @@
     modal('New message', `<input class="search-input" id="dm-filter" placeholder="Find a teammate"><div id="dm-people" style="margin-top:10px"></div>`);
     const draw = (q = '') => {
       $('#dm-people').innerHTML = people.filter((u) => u.name.toLowerCase().includes(q.toLowerCase())).map((u) =>
-        `<div class="list-row" data-user="${u.id}">${avatar(u)}<div class="grow"><strong>${esc(u.name)}</strong>${u.id === S.me.id ? ' <span class="muted">(you · notes to self)</span>' : ''}<div class="sub">${esc(u.title || '')}</div></div><span class="dot${S.online.has(u.id) ? ' on' : ''}"></span></div>`).join('') || '<p class="muted">No one found. Invite your teammates to create an account.</p>';
+        `<div class="list-row" data-user="${u.id}">${avatar(u)}<div class="grow"><strong>${esc(u.name)}</strong>${u.isBot ? ' <span class="tag">AI</span>' : ''}${u.id === S.me.id ? ' <span class="muted">(you · notes to self)</span>' : ''}<div class="sub">${esc(u.title || '')}</div></div><span class="dot${S.online.has(u.id) ? ' on' : ''}"></span></div>`).join('') || '<p class="muted">No one found. Invite your teammates to create an account.</p>';
     };
     draw();
     $('#dm-filter').focus();
@@ -558,20 +852,14 @@
   }
   $('#dm-add').addEventListener('click', newDM);
 
-  $('#me-bar').addEventListener('click', () => {
-    modal('Your profile', `
-      <div class="field">Full name<input id="p-name" value="${esc(S.me.name)}" maxlength="60"></div>
-      <div class="field">Role<input id="p-title" value="${esc(S.me.title || '')}" maxlength="60" placeholder="e.g. REALTOR®, Team Lead"></div>
-      <div class="field">Status<input id="p-status" value="${esc(S.me.status || '')}" maxlength="80" placeholder="e.g. 🏡 At a listing appointment"></div>
-      <div class="modal-actions"><button class="btn" data-close>Cancel</button><button class="btn-gold" id="p-save">Save</button></div>`);
-    $('#p-save').onclick = () => { S.socket.emit('profile:update', { name: $('#p-name').value, title: $('#p-title').value, status: $('#p-status').value }); closeModal(); toast('Profile updated'); };
-  });
+  $('#me-bar').addEventListener('click', () => openSettings('profile'));
+  $('#settings-open').addEventListener('click', () => openSettings('notifications'));
 
   // ---------- Search ----------
   function resultRow(m) {
     const c = S.channels[m.channelId];
     const u = S.users[m.userId];
-    return `<div class="result" data-goto="${m.parentId || m.id}" data-chan="${m.channelId}"><div class="meta">${c ? (c.isDM ? esc(channelLabel(c)) : '#' + esc(c.name)) : ''} · ${esc(u?.name || '')} · ${fmtDay(m.ts)} ${fmtTime(m.ts)}</div><div class="msg-text">${format(m.text)}</div></div>`;
+    return `<div class="result" data-goto="${m.parentId || m.id}" data-chan="${m.channelId}"><div class="meta">${c ? (c.isDM ? esc(channelLabel(c)) : '#' + esc(fullLabel(c))) : ''} · ${esc(u?.name || '')} · ${fmtDay(m.ts)} ${fmtTime(m.ts)}</div><div class="msg-text">${format(m.text)}</div></div>`;
   }
   function bindResults() {
     $('#modal-body').onclick = (e) => {
@@ -628,7 +916,7 @@
   });
 
   const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
-  const dismissed = (k) => store.get('kaizenhq_dismiss_' + k);
+  const dismissed = (k) => +(store.get('kaizenhq_dismiss_' + k) || 0) > Date.now();
 
   function setupAppBanners() {
     // Install prompt
@@ -648,6 +936,15 @@
     const canAsk = pushSupported() && Notification.permission === 'default' && (!isIOS || isStandalone);
     nb.classList.toggle('hidden', !canAsk || !!dismissed('notify'));
     if (pushSupported() && Notification.permission === 'granted') subscribePush();
+    // First time on this device: ask right away instead of waiting for someone to find the banner.
+    if (canAsk && !store.get('kaizenhq_asked_notify')) {
+      store.set('kaizenhq_asked_notify', '1');
+      modal('Stay in the loop', `<div class="notify-hero"><div class="bell-big">🔔</div>
+        <p>Get notified the moment a teammate messages you, @mentions you, or posts in your channels, even when Kaizen HQ is closed.</p>
+        <p class="sub">You choose which channels notify you and which sound plays in <strong>Settings → Notifications</strong>.</p></div>
+        <div class="modal-actions"><button class="btn" data-close>Later</button><button class="btn-gold" id="hero-enable">Turn on notifications</button></div>`);
+      $('#hero-enable').onclick = async () => { closeModal(); await enableNotifications(); };
+    }
   }
   $('#install-btn').addEventListener('click', async () => {
     if (!installEvent) return;
@@ -656,14 +953,16 @@
     installEvent = null;
     $('#install-banner').classList.add('hidden');
   });
-  $('#notify-btn').addEventListener('click', async () => {
+  async function enableNotifications() {
+    unlockAudio();
     const result = await Notification.requestPermission();
     $('#notify-banner').classList.add('hidden');
-    if (result === 'granted') { await subscribePush(); toast('Notifications are on'); }
-    else toast('Notifications are off. You can turn them on later in your device settings.');
-  });
+    if (result === 'granted') { await subscribePush(); playSound(S.prefs.sound); toast('Notifications are on'); }
+    else toast('Notifications are off. You can turn them on later in Settings.');
+  }
+  $('#notify-btn').addEventListener('click', enableNotifications);
   document.querySelectorAll('[data-dismiss]').forEach((b) => b.addEventListener('click', () => {
-    store.set('kaizenhq_dismiss_' + b.dataset.dismiss, '1');
+    store.set('kaizenhq_dismiss_' + b.dataset.dismiss, String(Date.now() + 3 * 864e5));
     b.closest('.app-banner').classList.add('hidden');
   }));
 
@@ -680,6 +979,16 @@
       S.pushOn = true;
     } catch (err) { console.warn('Push setup failed', err); }
   }
+
+  // Feel like an app, not a web page: block pinch-zoom and double-tap zoom.
+  ['gesturestart', 'gesturechange', 'gestureend'].forEach((ev) => document.addEventListener(ev, (e) => e.preventDefault(), { passive: false }));
+  document.addEventListener('touchmove', (e) => { if (e.touches.length > 1 || (e.scale && e.scale !== 1)) e.preventDefault(); }, { passive: false });
+  let lastTouchEnd = 0;
+  document.addEventListener('touchend', (e) => {
+    const now = Date.now();
+    if (now - lastTouchEnd < 300 && !e.target.closest('textarea, input')) e.preventDefault();
+    lastTouchEnd = now;
+  }, { passive: false });
 
   initAuth();
 })();

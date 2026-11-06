@@ -35,6 +35,13 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
+/* App feel on phones: no zoom, no page bounce, no grey tap flashes, no accidental text selection on controls */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; touch-action: manipulation; }
+body { overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
+.app { position: fixed; inset: 0; overflow: hidden; }
+.auth { height: 100%; overflow-y: auto; }
+.sidebar, .chan-header, .panel-header, .composer-tools, button, .tabs, .side-title { -webkit-user-select: none; user-select: none; }
+.messages, .panel-body, .side-scroll, #modal-body { overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 body { font-family: var(--font); font-size: 15px; color: var(--text); background: var(--bg); -webkit-font-smoothing: antialiased; }
 button { font: inherit; cursor: pointer; }
 input, textarea { font: inherit; color: inherit; }
@@ -200,7 +207,59 @@ mark { background: var(--mention-bg); color: inherit; font-weight: 600; }
 
 .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--charcoal); color: #fff; padding: 10px 16px; border-radius: 8px; font-size: 14px; z-index: 40; border-left: 3px solid var(--gold); }
 
+/* ---------- Sub-channels, tags, settings ---------- */
+.ws-tools { display: flex; gap: 2px; }
+.side-item { position: relative; }
+.side-item.child { padding-left: 30px; font-size: 14px; }
+.side-item .hash.sub { font-size: 12px; }
+.side-item.muted-chan { opacity: .5; }
+.side-item.active.muted-chan { opacity: 1; }
+.side-item.archived { font-style: italic; opacity: .6; }
+.mute-icon { font-size: 11px; opacity: .8; }
+.caret { border: 0; background: transparent; color: inherit; padding: 2px 4px; font-size: 11px; opacity: .7; transition: transform .15s; order: 99; }
+.caret.open { transform: rotate(90deg); }
+.side-item .caret { margin-left: auto; }
+.tag { display: inline-block; font-size: 10.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; background: var(--charcoal); color: var(--gold); border-radius: 4px; padding: 1px 5px; vertical-align: 2px; margin-left: 6px; }
+.avatar.bot { background: var(--charcoal); color: var(--gold); font-size: 16px; border: 1px solid #3a3122; }
+.crumb { color: var(--muted); font-weight: 600; cursor: pointer; }
+.crumb:hover { color: var(--text); text-decoration: underline; }
+.crumb-sep { color: var(--muted); font-weight: 400; margin: 0 2px; }
+.emoji-btn { font-size: 16px; line-height: 1; padding: 7px; }
+.emoji-btn.dim { opacity: .55; }
+.detail-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+.modal-sub { margin: 16px 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.field select, .chan-pref select { border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; font-size: 15px; background: var(--bg); color: var(--text); width: 100%; }
+.chan-pref select { width: auto; padding: 6px 8px; font-size: 14px; }
+.tabs { display: flex; gap: 4px; background: var(--bg-soft); border-radius: 10px; padding: 4px; margin-bottom: 14px; }
+.tabs button { flex: 1; border: 0; background: transparent; padding: 8px; border-radius: 7px; font-weight: 600; color: var(--muted); font-size: 14px; }
+.tabs button.active { background: var(--bg); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+.set-block { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.set-block:last-child { border-bottom: 0; }
+.set-title { font-weight: 700; margin-bottom: 4px; }
+.sub { font-size: 13px; color: var(--muted); line-height: 1.45; }
+.small { font-size: 12.5px; }
+.sound-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 6px; }
+.sound-opt { border: 1px solid var(--line); background: var(--bg); color: var(--text); border-radius: 8px; padding: 9px 6px; font-size: 13.5px; font-weight: 600; }
+.sound-opt.active { border-color: var(--gold); background: var(--mention-bg); }
+.chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.chan-pref { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
+.chan-pref.child { padding-left: 18px; font-size: 14px; }
+.chan-pref .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.radio-row { display: flex; gap: 10px; align-items: flex-start; padding: 10px; border: 1px solid var(--line); border-radius: 10px; margin-bottom: 8px; cursor: pointer; }
+.radio-row:has(input:checked) { border-color: var(--gold); background: var(--mention-bg); }
+.radio-row input { margin-top: 3px; accent-color: var(--gold-dark); }
+.copy-row { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
+.copy-row code { flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; background: var(--code-bg); padding: 8px 10px; border-radius: 6px; font-size: 13px; }
+.copy-row input { flex: 1; border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; background: var(--bg); }
+.key-box { margin-top: 10px; padding: 12px; border: 1px solid var(--gold); border-radius: 10px; background: var(--mention-bg); }
+.btn.danger { color: var(--danger); }
+.notify-hero { text-align: center; padding: 4px 6px 8px; }
+.notify-hero p { line-height: 1.5; }
+.bell-big { font-size: 44px; }
+textarea:disabled { cursor: not-allowed; }
+
 /* ---------- Install / notification banners ---------- */
+.main .app-banner { margin: 10px 20px 0; }
 .app-banner { margin: 10px 10px 0; padding: 12px; border-radius: 10px; background: #1a1712; border: 1px solid #3a3122; color: #e9e2d4; font-size: 13px; line-height: 1.4; }
 .banner-row { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
 .banner-btn { background: var(--gold); color: var(--charcoal); border: 0; border-radius: 7px; padding: 6px 12px; font-weight: 600; font-size: 13px; }
@@ -232,4 +291,6 @@ mark { background: var(--mention-bg); color: inherit; font-weight: 600; }
   .chan-header { padding-top: max(10px, env(safe-area-inset-top)); }
   .composer { padding-bottom: max(12px, env(safe-area-inset-bottom)); }
   .msg-actions { right: 12px; }
+  .main .app-banner { margin: 8px 12px 0; }
+  .sound-grid { grid-template-columns: repeat(2, 1fr); }
 }

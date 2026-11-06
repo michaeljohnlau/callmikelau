@@ -5,6 +5,9 @@ Private, real-time team chat for **Kaizen Real Estate Team**. It gives the team 
 ## What it does
 
 - **Channels:** `#general`, `#wins`, `#listings`, `#leads` and `#marketing` come built in. Anyone can create, browse, join or leave channels and edit a channel's topic.
+- **Sub-channels:** one per listing address, e.g. `#listings › 24 Juniper Crescent`. Everyone in the main channel is added automatically. Archive a sub-channel when the deal closes; its messages stay searchable.
+- **Notification controls:** set each channel to *All messages*, *Mentions only* or *Muted* (sub-channels follow their main channel unless changed). Choose from 6 sounds and pause notifications for 30 min, 1 hour, 2 hours or until tomorrow at 8am. Find these under the 🔔 in the sidebar or the channel header.
+- **AI assistants (MCP):** connect Grok or any MCP-capable assistant. See below.
 - **Direct messages:** one-on-one chats, plus "notes to self."
 - **Threads:** reply to a message without cluttering the channel.
 - **@mentions:** autocomplete for teammates' names, plus `@here` and `@channel`. Mentions are highlighted and counted as unread.
@@ -27,6 +30,35 @@ Kaizen HQ installs on phones like a regular app. It gets a home-screen icon, ope
 Push notifications go out for **direct messages, @mentions, @here/@channel and thread replies**, only when the app isn't open on screen. This keeps people from getting buzzed twice.
 
 > Push needs the site on **HTTPS**, which every host listed below provides. The push keys are saved in `DATA_DIR/vapid.json`. Keep that folder on a persistent disk, or set `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY`, so phones stay subscribed between restarts.
+
+## Connect Grok (or another AI assistant) over MCP
+
+Kaizen HQ includes an MCP server at `https://<your-domain>/mcp` (Streamable HTTP).
+
+1. Sign in as an admin, then go to **🔔 Settings → AI assistants → Create key**. Copy the key; it is only shown once.
+2. In Grok or another MCP client, add a **remote MCP server**:
+   - URL: `https://<your-domain>/mcp`
+   - Header: `Authorization: Bearer <key>`
+3. The assistant appears in the team list with an **AI** tag. Remove it any time from the same screen and its key stops working immediately.
+
+**Tools it gets:** `list_channels`, `read_messages`, `read_thread`, `search_messages`, `get_my_mentions` (who @mentioned it and whether it has answered yet), `send_message` (including thread replies), `create_channel` (including listing sub-channels) and `list_team`.
+
+**What it can see:** all public channels and sub-channels. It cannot see direct messages between teammates, only DMs sent to the assistant itself.
+
+**Example (xAI API):** pass the MCP server as a tool when calling Grok:
+
+```json
+{
+  "tools": [{
+    "type": "mcp",
+    "server_label": "kaizen-hq",
+    "server_url": "https://hq.kaizenrealestate.ca/mcp",
+    "authorization": "<key>"
+  }]
+}
+```
+
+(The exact field names depend on the Grok or xAI client you use. The URL and Bearer key are the only two things it needs.)
 
 ## Run it locally
 

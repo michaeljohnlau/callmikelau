@@ -12,8 +12,10 @@
   "license": "UNLICENSED",
   "private": true,
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "express": "^4.22.3",
     "socket.io": "^4.8.4",
-    "web-push": "^3.6.7"
+    "web-push": "^3.6.7",
+    "zod": "^3.25.76"
   }
 }

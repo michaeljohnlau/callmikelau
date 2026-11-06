@@ -1,5 +1,5 @@
 // Kaizen HQ service worker: offline app shell + push notifications.
-const CACHE = 'kaizenhq-v1';
+const CACHE = 'kaizenhq-v2';
 const SHELL = ['/', '/styles.css', '/app.js', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {

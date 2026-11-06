@@ -8,6 +8,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { Server } = require('socket.io');
 const webpush = require('web-push');
+const { mountMcp } = require('./mcp');
 
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -28,10 +29,10 @@ const DEFAULT_CHANNELS = [
 ];
 
 function freshDb() {
-  const db = { users: {}, sessions: {}, channels: {}, messages: [] };
+  const db = { users: {}, sessions: {}, channels: {}, messages: [], botTokens: {} };
   for (const [name, topic] of DEFAULT_CHANNELS) {
     const id = uid();
-    db.channels[id] = { id, name, topic, isDM: false, members: [], createdBy: null, createdAt: Date.now(), isDefault: true };
+    db.channels[id] = { id, name, topic, isDM: false, members: [], createdBy: null, createdAt: Date.now(), isDefault: true, parentId: null };
   }
   return db;
 }
@@ -42,6 +43,7 @@ try {
 } catch {
   db = freshDb();
 }
+db.botTokens = db.botTokens || {};
 
 // ---------- Push notifications (VAPID keys are generated once and saved) ----------
 const VAPID_FILE = path.join(DATA_DIR, 'vapid.json');
@@ -70,21 +72,33 @@ function save() {
 function uid() {
   return crypto.randomBytes(9).toString('base64url');
 }
+const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 
 function hashPassword(password, salt = crypto.randomBytes(16).toString('hex')) {
   const hash = crypto.scryptSync(password, salt, 64).toString('hex');
   return `${salt}:${hash}`;
 }
 function checkPassword(password, stored) {
+  if (!stored) return false;
   const [salt, hash] = stored.split(':');
   const test = crypto.scryptSync(password, salt, 64);
   return crypto.timingSafeEqual(test, Buffer.from(hash, 'hex'));
 }
 
 const COLORS = ['#c9a96e', '#7aa6c2', '#9bbf8a', '#d08770', '#b48ead', '#88c0d0', '#ebcb8b', '#a3be8c'];
+const LEVELS = ['all', 'mentions', 'mute'];
+const SOUNDS = ['chime', 'ding', 'pop', 'marimba', 'soft', 'none'];
 
 function publicUser(u) {
-  return { id: u.id, name: u.name, email: u.email, title: u.title || '', color: u.color, isAdmin: !!u.isAdmin, status: u.status || '' };
+  return { id: u.id, name: u.name, email: u.isBot ? '' : u.email, title: u.title || '', color: u.color, isAdmin: !!u.isAdmin, isBot: !!u.isBot, status: u.status || '' };
+}
+
+function prefsOf(u) {
+  u.prefs = u.prefs || {};
+  u.prefs.notify = u.prefs.notify || {};
+  if (!SOUNDS.includes(u.prefs.sound)) u.prefs.sound = 'chime';
+  u.prefs.pauseUntil = u.prefs.pauseUntil || 0;
+  return u.prefs;
 }
 
 function userFromToken(token) {
@@ -92,123 +106,43 @@ function userFromToken(token) {
   return s ? db.users[s.userId] : null;
 }
 
-// ---------- HTTP ----------
-const app = express();
-app.use(express.json({ limit: '100kb' }));
-app.use(express.static(path.join(__dirname, 'public')));
-
-app.get('/healthz', (req, res) => res.send('ok'));
-
-app.get('/api/config', (req, res) => {
-  res.json({ workspace: WORKSPACE_NAME, inviteRequired: !!INVITE_CODE, hasUsers: Object.keys(db.users).length > 0 });
-});
-
-app.get('/api/push-key', (req, res) => res.json({ key: vapid.publicKey }));
-
-app.post('/api/register', (req, res) => {
-  const { name, email, password, title, invite } = req.body || {};
-  const cleanEmail = String(email || '').trim().toLowerCase();
-  const cleanName = String(name || '').trim().slice(0, 60);
-  if (!cleanName || !cleanEmail || !password) return res.status(400).json({ error: 'Name, email and password are required.' });
-  if (String(password).length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
-  if (INVITE_CODE && invite !== INVITE_CODE) return res.status(403).json({ error: 'That invite code is not valid.' });
-  if (Object.values(db.users).some((u) => u.email === cleanEmail)) return res.status(409).json({ error: 'An account with that email already exists.' });
-
-  const isFirst = Object.keys(db.users).length === 0;
-  const id = uid();
-  db.users[id] = {
-    id,
-    name: cleanName,
-    email: cleanEmail,
-    title: String(title || '').trim().slice(0, 60),
-    password: hashPassword(String(password)),
-    color: COLORS[Object.keys(db.users).length % COLORS.length],
-    isAdmin: isFirst,
-    lastRead: {},
-    createdAt: Date.now(),
-  };
-  // Everyone joins the default channels.
-  for (const c of Object.values(db.channels)) if (c.isDefault) c.members.push(id);
-  const announce = () => { for (const c of Object.values(db.channels)) if (c.isDefault) emitToChannel(c, 'channel:members', { channelId: c.id, members: c.members }); };
-  const token = crypto.randomBytes(24).toString('hex');
-  db.sessions[token] = { userId: id, createdAt: Date.now() };
-  save();
-  io.emit('user:new', publicUser(db.users[id]));
-  announce();
-  res.json({ token });
-});
-
-app.post('/api/login', (req, res) => {
-  const { email, password } = req.body || {};
-  const user = Object.values(db.users).find((u) => u.email === String(email || '').trim().toLowerCase());
-  if (!user || !checkPassword(String(password || ''), user.password)) return res.status(401).json({ error: 'Email or password is incorrect.' });
-  const token = crypto.randomBytes(24).toString('hex');
-  db.sessions[token] = { userId: user.id, createdAt: Date.now() };
-  save();
-  res.json({ token });
-});
-
-app.post('/api/logout', (req, res) => {
-  const token = req.get('authorization')?.replace('Bearer ', '');
-  if (token) delete db.sessions[token];
-  save();
-  res.json({ ok: true });
-});
-
-const server = http.createServer(app);
-const io = new Server(server);
-
-// ---------- Realtime ----------
-const online = new Map(); // userId -> socket count
-
-// True if the user has the app open and on screen somewhere.
-function isWatching(userId) {
-  for (const s of io.sockets.sockets.values()) if (s.data.userId === userId && s.data.visible) return true;
-  return false;
-}
-
-function pushTo(userId, payload) {
-  const u = db.users[userId];
-  if (!u?.push?.length || isWatching(userId)) return;
-  for (const sub of [...u.push]) {
-    webpush.sendNotification(sub, JSON.stringify(payload), { TTL: 3600 }).catch((err) => {
-      if (err.statusCode === 404 || err.statusCode === 410) {
-        u.push = u.push.filter((x) => x.endpoint !== sub.endpoint);
-        save();
-      }
-    });
-  }
-}
-
-function notifyRecipients(c, m, sender) {
-  const recipients = new Set();
-  if (c.isDM) c.members.forEach((id) => recipients.add(id));
-  const mentions = m.mentions || [];
-  if (mentions.includes('*')) c.members.forEach((id) => recipients.add(id));
-  mentions.forEach((id) => c.members.includes(id) && recipients.add(id));
-  if (m.parentId) {
-    const parent = db.messages.find((p) => p.id === m.parentId);
-    if (parent) recipients.add(parent.userId);
-    db.messages.filter((r) => r.parentId === m.parentId).forEach((r) => recipients.add(r.userId));
-  }
-  recipients.delete(sender.id);
-  const where = c.isDM ? sender.name : `${sender.name} in #${c.name}`;
-  for (const id of recipients) {
-    pushTo(id, { title: m.parentId ? `${where} (thread)` : where, body: m.text.slice(0, 180), channelId: c.id, tag: c.id });
-  }
-}
+// ---------- Core (shared by the app and the MCP connection) ----------
+let io; // set below
 
 function canSee(user, channel) {
-  return channel && channel.members.includes(user.id);
+  if (!channel || !user) return false;
+  if (channel.members.includes(user.id)) return true;
+  return !!user.isBot && !channel.isDM; // bots can read any public channel
+}
+
+function channelSlug(s) {
+  return String(s || '').toLowerCase().trim().replace(/^#/, '').replace(/[^a-z0-9-_]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+}
+
+function displayName(c) {
+  if (c.isDM) return 'Direct message';
+  const own = c.label || c.name;
+  const parent = c.parentId && db.channels[c.parentId];
+  return parent ? `${parent.name} › ${own}` : own;
+}
+
+// Notification level for a user in a channel: own setting → parent channel's setting → "all".
+function levelFor(u, c) {
+  const n = prefsOf(u).notify;
+  return n[c.id] || (c.parentId && n[c.parentId]) || 'all';
 }
 
 function channelView(c, user) {
   const msgs = db.messages.filter((m) => m.channelId === c.id && !m.parentId && !m.deleted);
   const lastRead = user.lastRead?.[c.id] || 0;
   const unread = msgs.filter((m) => m.ts > lastRead && m.userId !== user.id).length;
-  const mentions = msgs.filter((m) => m.ts > lastRead && m.userId !== user.id && (m.mentions || []).includes(user.id)).length;
-  return { id: c.id, name: c.name, topic: c.topic, isDM: c.isDM, members: c.members, createdBy: c.createdBy, unread, mentions };
+  const mentions = msgs.filter((m) => m.ts > lastRead && m.userId !== user.id && (m.mentions || []).some((id) => id === user.id || id === '*')).length;
+  return {
+    id: c.id, name: c.name, label: c.label || '', topic: c.topic, isDM: c.isDM, members: c.members, createdBy: c.createdBy,
+    parentId: c.parentId || null, archived: !!c.archived, isDefault: !!c.isDefault, unread, mentions,
+  };
 }
+const browseView = (c) => ({ id: c.id, name: c.name, label: c.label || '', topic: c.topic, parentId: c.parentId || null, archived: !!c.archived, memberCount: c.members.length });
 
 function messageView(m) {
   return {
@@ -223,6 +157,7 @@ function parseMentions(text) {
   const ids = new Set();
   const lower = text.toLowerCase();
   for (const u of Object.values(db.users)) {
+    if (u.disabled) continue;
     const handle = '@' + u.name.toLowerCase();
     const first = '@' + u.name.split(' ')[0].toLowerCase();
     if (lower.includes(handle) || lower.includes(first)) ids.add(u.id);
@@ -234,6 +169,189 @@ function parseMentions(text) {
 function emitToChannel(channel, event, payload) {
   for (const memberId of channel.members) io.to('u:' + memberId).emit(event, payload);
 }
+function emitToUser(userId, event, payload) {
+  io.to('u:' + userId).emit(event, payload);
+}
+
+// True if the user has the app open and on screen somewhere.
+function isWatching(userId) {
+  for (const s of io.sockets.sockets.values()) if (s.data.userId === userId && s.data.visible) return true;
+  return false;
+}
+
+function pushTo(userId, payload) {
+  const u = db.users[userId];
+  if (!u?.push?.length || isWatching(userId)) return;
+  for (const sub of [...u.push]) {
+    webpush.sendNotification(sub, JSON.stringify(payload), { TTL: 3600, urgency: 'high' }).catch((err) => {
+      if (err.statusCode === 404 || err.statusCode === 410) {
+        u.push = u.push.filter((x) => x.endpoint !== sub.endpoint);
+        save();
+      }
+    });
+  }
+}
+
+// Should this user be notified about this message? Mirrors the logic in the app.
+function shouldNotify(u, c, m) {
+  if (!u || u.isBot || u.id === m.userId) return false;
+  const prefs = prefsOf(u);
+  if (prefs.pauseUntil > Date.now()) return false;
+  const level = levelFor(u, c);
+  if (level === 'mute') return false;
+  const mentioned = (m.mentions || []).some((id) => id === u.id || id === '*');
+  if (m.parentId) {
+    const inThread = db.messages.some((x) => (x.id === m.parentId || x.parentId === m.parentId) && x.userId === u.id);
+    return inThread || mentioned;
+  }
+  if (c.isDM || mentioned) return true;
+  return level === 'all';
+}
+
+function notifyRecipients(c, m, sender) {
+  const where = c.isDM ? sender.name : `${sender.name} in #${displayName(c)}`;
+  for (const id of c.members) {
+    if (!shouldNotify(db.users[id], c, m)) continue;
+    pushTo(id, { title: m.parentId ? `${where} (thread)` : where, body: m.text.slice(0, 180), channelId: c.id, tag: c.id });
+  }
+}
+
+function postMessage(user, channelId, text, parentId) {
+  const c = db.channels[channelId];
+  const clean = String(text || '').trim().slice(0, 4000);
+  if (!canSee(user, c)) throw new Error('You are not a member of that channel.');
+  if (c.archived) throw new Error('This channel is archived. Unarchive it to post.');
+  if (!clean) throw new Error('Message is empty.');
+  if (parentId) {
+    const parent = db.messages.find((p) => p.id === parentId);
+    if (!parent || parent.channelId !== c.id) throw new Error('Thread not found in that channel.');
+  }
+  if (user.isBot && !c.members.includes(user.id)) {
+    c.members.push(user.id);
+    emitToChannel(c, 'channel:members', { channelId: c.id, members: c.members });
+  }
+  const m = { id: uid(), channelId: c.id, userId: user.id, text: clean, ts: Date.now(), parentId: parentId || null, reactions: {}, mentions: parseMentions(clean) };
+  db.messages.push(m);
+  user.lastRead = user.lastRead || {};
+  user.lastRead[c.id] = m.ts;
+  if (parentId) {
+    const parent = db.messages.find((p) => p.id === parentId);
+    parent.replyCount = (parent.replyCount || 0) + 1;
+    parent.lastReplyTs = m.ts;
+    emitToChannel(c, 'message:update', messageView(parent));
+  }
+  save();
+  emitToChannel(c, 'message:new', messageView(m));
+  notifyRecipients(c, m, user);
+  return m;
+}
+
+function createChannel(user, { name, topic, parentId }) {
+  const parent = parentId ? db.channels[parentId] : null;
+  if (parentId && (!parent || parent.isDM || parent.parentId)) throw new Error('Sub-channels can only be added under a main channel.');
+  if (parent && !canSee(user, parent)) throw new Error('Join the parent channel first.');
+  const label = String(name || '').trim().replace(/^#/, '').slice(0, 80);
+  const slug = channelSlug(label);
+  if (!slug) throw new Error('Give the channel a name.');
+  const clash = Object.values(db.channels).some((c) => !c.isDM && (c.parentId || null) === (parentId || null) && c.name === slug);
+  if (clash) throw new Error(parent ? `#${parent.name} already has a sub-channel with that name.` : 'That channel already exists.');
+  const id = uid();
+  const members = parent ? [...new Set([...parent.members.filter((mid) => !db.users[mid]?.isBot), user.id])] : [user.id];
+  const c = {
+    id, name: slug, label: parent && label !== slug ? label : '', topic: String(topic || '').slice(0, 200), isDM: false,
+    members, createdBy: user.id, createdAt: Date.now(), parentId: parent ? parent.id : null,
+  };
+  db.channels[id] = c;
+  save();
+  for (const mid of members) emitToUser(mid, 'channel:joined', channelView(c, db.users[mid]));
+  for (const s of io.sockets.sockets.values()) if (!members.includes(s.data.userId)) s.emit('channel:available', browseView(c));
+  return c;
+}
+
+// ---------- HTTP ----------
+const app = express();
+app.use(express.json({ limit: '200kb' }));
+app.use(express.static(path.join(__dirname, 'public')));
+
+app.get('/healthz', (req, res) => res.send('ok'));
+
+app.get('/api/config', (req, res) => {
+  res.json({ workspace: WORKSPACE_NAME, inviteRequired: !!INVITE_CODE, hasUsers: Object.values(db.users).some((u) => !u.isBot) });
+});
+
+app.get('/api/push-key', (req, res) => res.json({ key: vapid.publicKey }));
+
+app.post('/api/register', (req, res) => {
+  const { name, email, password, title, invite } = req.body || {};
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  const cleanName = String(name || '').trim().slice(0, 60);
+  if (!cleanName || !cleanEmail || !password) return res.status(400).json({ error: 'Name, email and password are required.' });
+  if (String(password).length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+  if (INVITE_CODE && invite !== INVITE_CODE) return res.status(403).json({ error: 'That invite code is not valid.' });
+  if (Object.values(db.users).some((u) => !u.isBot && u.email === cleanEmail)) return res.status(409).json({ error: 'An account with that email already exists.' });
+
+  const isFirst = !Object.values(db.users).some((u) => !u.isBot);
+  const id = uid();
+  db.users[id] = {
+    id,
+    name: cleanName,
+    email: cleanEmail,
+    title: String(title || '').trim().slice(0, 60),
+    password: hashPassword(String(password)),
+    color: COLORS[Object.keys(db.users).length % COLORS.length],
+    isAdmin: isFirst,
+    lastRead: {},
+    prefs: { notify: {}, sound: 'chime', pauseUntil: 0 },
+    createdAt: Date.now(),
+  };
+  // Everyone joins the default channels and their sub-channels.
+  const joined = Object.values(db.channels).filter((c) => !c.isDM && (c.isDefault || (c.parentId && db.channels[c.parentId]?.isDefault)) && !c.archived);
+  for (const c of joined) c.members.push(id);
+  const token = crypto.randomBytes(24).toString('hex');
+  db.sessions[token] = { userId: id, createdAt: Date.now() };
+  save();
+  io.emit('user:new', publicUser(db.users[id]));
+  for (const c of joined) emitToChannel(c, 'channel:members', { channelId: c.id, members: c.members });
+  res.json({ token });
+});
+
+app.post('/api/login', (req, res) => {
+  const { email, password } = req.body || {};
+  const user = Object.values(db.users).find((u) => !u.isBot && u.email === String(email || '').trim().toLowerCase());
+  if (!user || !checkPassword(String(password || ''), user.password)) return res.status(401).json({ error: 'Email or password is incorrect.' });
+  const token = crypto.randomBytes(24).toString('hex');
+  db.sessions[token] = { userId: user.id, createdAt: Date.now() };
+  save();
+  res.json({ token });
+});
+
+app.post('/api/logout', (req, res) => {
+  const token = req.get('authorization')?.replace('Bearer ', '');
+  if (token) delete db.sessions[token];
+  save();
+  res.json({ ok: true });
+});
+
+// MCP endpoint for AI assistants (Grok, Claude, etc.), authenticated with a bot key.
+mountMcp(app, {
+  workspace: WORKSPACE_NAME,
+  get db() { return db; },
+  botFromKey(key) {
+    const rec = key && db.botTokens[sha256(key)];
+    const bot = rec && db.users[rec.userId];
+    if (!bot || bot.disabled) return null;
+    rec.lastUsed = Date.now();
+    save();
+    return bot;
+  },
+  canSee, displayName, messageView, postMessage, createChannel, channelSlug,
+});
+
+const server = http.createServer(app);
+io = new Server(server);
+
+// ---------- Realtime ----------
+const online = new Map(); // userId -> socket count
 
 io.use((socket, next) => {
   const user = userFromToken(socket.handshake.auth?.token);
@@ -242,6 +360,13 @@ io.use((socket, next) => {
   next();
 });
 
+function botList() {
+  return Object.entries(db.botTokens).map(([hash, rec]) => {
+    const u = db.users[rec.userId];
+    return u && !u.disabled ? { id: u.id, name: u.name, createdAt: rec.createdAt, lastUsed: rec.lastUsed || null, keyHint: rec.hint } : null;
+  }).filter(Boolean);
+}
+
 io.on('connection', (socket) => {
   const me = () => db.users[socket.data.userId];
   const user = me();
@@ -249,13 +374,17 @@ io.on('connection', (socket) => {
   online.set(user.id, (online.get(user.id) || 0) + 1);
   io.emit('presence', { userId: user.id, online: true });
 
+  const ok = (cb, data = {}) => cb?.({ ok: true, ...data });
+  const fail = (cb, err) => cb?.({ error: err.message || String(err) });
+
   socket.emit('init', {
     workspace: WORKSPACE_NAME,
     me: publicUser(user),
-    users: Object.values(db.users).map(publicUser),
+    prefs: prefsOf(user),
+    users: Object.values(db.users).filter((u) => !u.disabled).map(publicUser),
     online: [...online.keys()],
-    channels: Object.values(db.channels).filter((c) => canSee(user, c)).map((c) => channelView(c, user)),
-    browse: Object.values(db.channels).filter((c) => !c.isDM && !canSee(user, c)).map((c) => ({ id: c.id, name: c.name, topic: c.topic, memberCount: c.members.length })),
+    channels: Object.values(db.channels).filter((c) => c.members.includes(user.id)).map((c) => channelView(c, user)),
+    browse: Object.values(db.channels).filter((c) => !c.isDM && !c.members.includes(user.id)).map(browseView),
   });
 
   socket.on('history', ({ channelId, before }, cb) => {
@@ -274,24 +403,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('message:send', ({ channelId, text, parentId }, cb) => {
-    const c = db.channels[channelId];
-    const clean = String(text || '').trim().slice(0, 4000);
-    if (!canSee(me(), c) || !clean) return cb?.({ error: 'Cannot send' });
-    const m = { id: uid(), channelId, userId: me().id, text: clean, ts: Date.now(), parentId: parentId || null, reactions: {}, mentions: parseMentions(clean) };
-    db.messages.push(m);
-    me().lastRead[channelId] = m.ts;
-    if (parentId) {
-      const parent = db.messages.find((p) => p.id === parentId);
-      if (parent) {
-        parent.replyCount = (parent.replyCount || 0) + 1;
-        parent.lastReplyTs = m.ts;
-        emitToChannel(c, 'message:update', messageView(parent));
-      }
-    }
-    save();
-    emitToChannel(c, 'message:new', messageView(m));
-    notifyRecipients(c, m, me());
-    cb?.({ ok: true });
+    try { postMessage(me(), channelId, text, parentId); ok(cb); } catch (e) { fail(cb, e); }
   });
 
   socket.on('message:edit', ({ messageId, text }) => {
@@ -343,39 +455,38 @@ io.on('connection', (socket) => {
   socket.on('typing', ({ channelId, parentId }) => {
     const c = db.channels[channelId];
     if (!canSee(me(), c)) return;
-    for (const id of c.members) if (id !== me().id) io.to('u:' + id).emit('typing', { channelId, parentId: parentId || null, userId: me().id });
+    for (const id of c.members) if (id !== me().id) emitToUser(id, 'typing', { channelId, parentId: parentId || null, userId: me().id });
   });
 
-  socket.on('channel:create', ({ name, topic }, cb) => {
-    const clean = String(name || '').toLowerCase().trim().replace(/^#/, '').replace(/[^a-z0-9-_]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
-    if (!clean) return cb?.({ error: 'Give the channel a name.' });
-    if (Object.values(db.channels).some((c) => !c.isDM && c.name === clean)) return cb?.({ error: 'That channel already exists.' });
-    const id = uid();
-    const c = { id, name: clean, topic: String(topic || '').slice(0, 200), isDM: false, members: [me().id], createdBy: me().id, createdAt: Date.now() };
-    db.channels[id] = c;
-    save();
-    socket.emit('channel:joined', channelView(c, me()));
-    socket.broadcast.emit('channel:available', { id, name: c.name, topic: c.topic, memberCount: 1 });
-    cb?.({ id });
+  socket.on('channel:create', ({ name, topic, parentId }, cb) => {
+    try { const c = createChannel(me(), { name, topic, parentId }); ok(cb, { id: c.id }); } catch (e) { fail(cb, e); }
   });
 
   socket.on('channel:join', ({ channelId }, cb) => {
     const c = db.channels[channelId];
     if (!c || c.isDM) return cb?.({ error: 'Not found' });
-    if (!c.members.includes(me().id)) c.members.push(me().id);
+    // Joining a main channel also joins its active sub-channels.
+    const subs = Object.values(db.channels).filter((x) => x.parentId === c.id && !x.archived);
+    for (const ch of [c, ...subs]) {
+      if (!ch.members.includes(me().id)) ch.members.push(me().id);
+      emitToChannel(ch, 'channel:members', { channelId: ch.id, members: ch.members });
+      socket.emit('channel:joined', channelView(ch, me()));
+    }
     save();
-    emitToChannel(c, 'channel:members', { channelId: c.id, members: c.members });
-    socket.emit('channel:joined', channelView(c, me()));
     cb?.({ id: c.id });
   });
 
   socket.on('channel:leave', ({ channelId }) => {
     const c = db.channels[channelId];
     if (!c || c.isDM) return;
-    c.members = c.members.filter((id) => id !== me().id);
+    const subs = Object.values(db.channels).filter((x) => x.parentId === c.id);
+    for (const ch of [c, ...subs]) {
+      if (!ch.members.includes(me().id)) continue;
+      ch.members = ch.members.filter((id) => id !== me().id);
+      socket.emit('channel:left', { channelId: ch.id, ...browseView(ch) });
+      emitToChannel(ch, 'channel:members', { channelId: ch.id, members: ch.members });
+    }
     save();
-    socket.emit('channel:left', { channelId, name: c.name, topic: c.topic, memberCount: c.members.length });
-    emitToChannel(c, 'channel:members', { channelId: c.id, members: c.members });
   });
 
   socket.on('channel:topic', ({ channelId, topic }) => {
@@ -384,6 +495,16 @@ io.on('connection', (socket) => {
     c.topic = String(topic || '').slice(0, 200);
     save();
     emitToChannel(c, 'channel:topic', { channelId, topic: c.topic });
+  });
+
+  socket.on('channel:archive', ({ channelId, archived }, cb) => {
+    const c = db.channels[channelId];
+    if (!c || c.isDM || c.isDefault) return cb?.({ error: 'This channel cannot be archived.' });
+    if (c.createdBy !== me().id && !me().isAdmin) return cb?.({ error: 'Only the person who created it or an admin can archive this channel.' });
+    c.archived = !!archived;
+    save();
+    io.emit('channel:archived', { channelId: c.id, archived: c.archived });
+    cb?.({ ok: true });
   });
 
   socket.on('dm:open', ({ userId }, cb) => {
@@ -397,7 +518,7 @@ io.on('connection', (socket) => {
       c = { id, name: '', topic: '', isDM: true, members, createdBy: me().id, createdAt: Date.now() };
       db.channels[id] = c;
       save();
-      for (const m of members) io.to('u:' + m).emit('channel:joined', channelView(c, db.users[m]));
+      for (const m of members) emitToUser(m, 'channel:joined', channelView(c, db.users[m]));
     }
     cb?.({ id: c.id });
   });
@@ -411,14 +532,55 @@ io.on('connection', (socket) => {
     io.emit('user:update', publicUser(u));
   });
 
+  // Notification preferences: per-channel level, sound and pause.
+  socket.on('prefs:update', (patch, cb) => {
+    const prefs = prefsOf(me());
+    if (patch?.channelId && LEVELS.includes(patch.level)) prefs.notify[patch.channelId] = patch.level;
+    if (patch?.channelId && patch.level === null) delete prefs.notify[patch.channelId];
+    if (SOUNDS.includes(patch?.sound)) prefs.sound = patch.sound;
+    if (typeof patch?.pauseUntil === 'number') prefs.pauseUntil = Math.max(0, patch.pauseUntil);
+    save();
+    emitToUser(me().id, 'prefs', prefs); // keep the user's other devices in sync
+    cb?.({ prefs });
+  });
+
   socket.on('search', ({ q }, cb) => {
     const term = String(q || '').toLowerCase().trim();
     if (term.length < 2) return cb?.({ results: [] });
-    const visible = new Set(Object.values(db.channels).filter((c) => canSee(me(), c)).map((c) => c.id));
+    const visible = new Set(Object.values(db.channels).filter((c) => c.members.includes(me().id)).map((c) => c.id));
     const results = db.messages
       .filter((m) => visible.has(m.channelId) && !m.deleted && m.text.toLowerCase().includes(term))
       .slice(-40).reverse().map(messageView);
     cb?.({ results });
+  });
+
+  // ----- Admin: AI assistants (bots) that connect over MCP -----
+  socket.on('bot:list', (_, cb) => {
+    if (!me().isAdmin) return cb?.({ error: 'Admins only.' });
+    cb?.({ bots: botList() });
+  });
+  socket.on('bot:create', ({ name }, cb) => {
+    if (!me().isAdmin) return cb?.({ error: 'Admins only.' });
+    const clean = String(name || 'Grok').trim().slice(0, 40) || 'Grok';
+    if (Object.values(db.users).some((u) => !u.disabled && u.name.toLowerCase() === clean.toLowerCase())) return cb?.({ error: 'Someone already uses that name.' });
+    const id = uid();
+    db.users[id] = { id, name: clean, email: '', title: 'AI assistant', color: '#1f1f1f', isBot: true, isAdmin: false, lastRead: {}, createdAt: Date.now() };
+    const key = 'khq_' + crypto.randomBytes(24).toString('base64url');
+    db.botTokens[sha256(key)] = { userId: id, createdAt: Date.now(), createdBy: me().id, hint: key.slice(0, 8) + '…' + key.slice(-4) };
+    for (const c of Object.values(db.channels)) if (c.isDefault) { c.members.push(id); emitToChannel(c, 'channel:members', { channelId: c.id, members: c.members }); }
+    save();
+    io.emit('user:new', publicUser(db.users[id]));
+    cb?.({ bot: { id, name: clean }, key });
+  });
+  socket.on('bot:revoke', ({ botId }, cb) => {
+    if (!me().isAdmin) return cb?.({ error: 'Admins only.' });
+    const u = db.users[botId];
+    if (!u?.isBot) return cb?.({ error: 'Not found' });
+    for (const [hash, rec] of Object.entries(db.botTokens)) if (rec.userId === botId) delete db.botTokens[hash];
+    u.disabled = true;
+    save();
+    io.emit('user:remove', { id: botId });
+    cb?.({ ok: true });
   });
 
   socket.data.visible = true;
