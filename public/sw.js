@@ -1,5 +1,5 @@
 // Kaizen HQ service worker: offline app shell + push notifications.
-const CACHE = 'kaizenhq-v3';
+const CACHE = 'kaizenhq-v4';
 const SHELL = ['/', '/styles.css', '/app.js', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
@@ -27,6 +27,10 @@ self.addEventListener('fetch', (e) => {
 self.addEventListener('push', (e) => {
   let data = {};
   try { data = e.data.json(); } catch { data = { title: 'Kaizen HQ', body: e.data?.text() || '' }; }
+  // Unread count on the app icon (iPhone home-screen app, and desktop/Android where supported).
+  if (typeof data.badge === 'number' && self.navigator.setAppBadge) {
+    (data.badge > 0 ? self.navigator.setAppBadge(data.badge) : self.navigator.clearAppBadge()).catch(() => {});
+  }
   e.waitUntil(self.registration.showNotification(data.title || 'Kaizen HQ', {
     body: data.body || '',
     tag: data.tag,

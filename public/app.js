@@ -121,6 +121,18 @@
     socket.on('message:update', onUpdateMessage);
     socket.on('typing', onTyping);
     socket.on('channel:joined', (c) => { S.channels[c.id] = c; delete S.browse[c.id]; renderSidebar(); });
+    socket.on('channel:removed', ({ channelId, browse }) => {
+      delete S.channels[channelId];
+      if (browse) S.browse[channelId] = browse; else delete S.browse[channelId];
+      if (S.current === channelId) openChannel((Object.values(S.channels).find((x) => x.name === 'general') || Object.values(S.channels)[0])?.id);
+      renderSidebar();
+    });
+    socket.on('channel:privacy', ({ channelId, isPrivate }) => {
+      if (!S.channels[channelId]) return;
+      S.channels[channelId].isPrivate = isPrivate;
+      renderSidebar();
+      if (channelId === S.current) renderHeader();
+    });
     socket.on('channel:left', (c) => {
       delete S.channels[c.channelId];
       S.browse[c.channelId] = { ...c, id: c.channelId };
@@ -197,17 +209,18 @@
     const dms = all.filter((c) => c.isDM).sort(byName);
     const childrenOf = (id) => all.filter((c) => c.parentId === id).sort(byName);
     const muted = (c) => levelOf(c) === 'mute';
-    const badgeFor = (c) => (c.id === S.current || muted(c) ? 0 : c.isDM ? c.unread : c.mentions) || 0;
+    // Same rule as the app-icon badge: DMs and "All messages" channels count every unread message, others count @mentions.
+    const badgeFor = (c) => (c.id === S.current || muted(c) ? 0 : c.isDM || levelOf(c) === 'all' ? c.unread : c.mentions) || 0;
     const item = (c, { child = false, kids = [] } = {}) => {
       const isOpen = !S.collapsed.has(c.id);
       const hidden = kids.length && !isOpen ? kids : [];
       const unreadHere = (c.unread && c.id !== S.current && !muted(c)) || hidden.some((k) => k.unread && !muted(k));
       const cls = ['side-item', child && 'child', c.id === S.current && 'active', unreadHere && 'unread', muted(c) && 'muted-chan', c.archived && 'archived'].filter(Boolean).join(' ');
-      let icon = '<span class="hash">#</span>';
+      let icon = c.isPrivate ? '<span class="hash lock">🔒</span>' : '<span class="hash">#</span>';
       if (c.isDM) {
         const other = c.members.find((id) => id !== S.me.id) || S.me.id;
         icon = S.users[other]?.isBot ? '<span class="hash">✦</span>' : `<span class="dot${S.online.has(other) ? ' on' : ''}"></span>`;
-      } else if (child) icon = '<span class="hash sub">⌂</span>';
+      } else if (child) icon = c.isPrivate ? '<span class="hash lock">🔒</span>' : '<span class="hash sub">⌂</span>';
       const caret = kids.length ? `<button class="caret${isOpen ? ' open' : ''}" data-toggle="${c.id}" aria-label="${isOpen ? 'Collapse' : 'Expand'}">▸</button>` : '';
       const count = badgeFor(c) + hidden.reduce((n, k) => n + badgeFor(k), 0);
       const badge = count ? `<span class="badge">${count}</span>` : '';
@@ -280,7 +293,7 @@
     if (!c) return;
     $('#chan-title').innerHTML = c.isDM ? esc(channelLabel(c)) : c.parentId
       ? `<span class="crumb" data-open="${c.parentId}"># ${esc((S.channels[c.parentId] || S.browse[c.parentId] || {}).name || '')}</span> <span class="crumb-sep">›</span> ${esc(c.label || c.name)}${c.archived ? ' <span class="tag">Archived</span>' : ''}`
-      : `# ${esc(c.name)}${c.archived ? ' <span class="tag">Archived</span>' : ''}`;
+      : `${c.isPrivate ? '🔒 ' : '# '}${esc(c.name)}${c.archived ? ' <span class="tag">Archived</span>' : ''}`;
     const lvl = levelOf(c);
     const bell = $('#bell-btn');
     bell.textContent = lvl === 'mute' ? '🔕' : '🔔';
@@ -306,29 +319,69 @@
     const go = () => { S.socket.emit('channel:topic', { channelId: c.id, topic: inp.value }); closeModal(); };
     $('#topic-save').onclick = go; inp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } };
   });
-  $('#members-btn').addEventListener('click', () => {
+  const canManage = (c) => c && !c.isDM && (c.createdBy === S.me.id || S.me.isAdmin);
+  function channelDetails() {
     const c = S.channels[S.current];
+    if (!c) return;
+    const manage = canManage(c);
     const rows = c.members.map((id) => S.users[id]).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name)).map((u) =>
-      `<div class="list-row" data-user="${u.id}">${avatar(u)}<div class="grow"><div><strong>${esc(u.name)}</strong>${u.isBot ? ` <span class="tag">${u.integration ? 'App' : 'AI'}</span>` : ''}${u.id === S.me.id ? ' <span class="muted">(you)</span>' : ''}</div><div class="sub">${esc(u.title || '')}${S.online.has(u.id) ? ' · <span style="color:var(--online)">Active</span>' : ''}</div></div></div>`).join('');
-    const canArchive = !c.isDM && !c.isDefault && (c.createdBy === S.me.id || S.me.isAdmin);
+      `<div class="list-row" data-user="${u.id}">${avatar(u)}<div class="grow"><div><strong>${esc(u.name)}</strong>${u.isBot ? ` <span class="tag">${u.integration ? 'App' : 'AI'}</span>` : ''}${u.id === S.me.id ? ' <span class="muted">(you)</span>' : ''}</div><div class="sub">${esc(u.title || '')}${S.online.has(u.id) ? ' · <span style="color:var(--online)">Active</span>' : ''}</div></div>
+        ${c.isPrivate && manage && u.id !== S.me.id && !c.isDM ? `<button class="btn small-btn danger" data-remove="${u.id}">Remove</button>` : ''}</div>`).join('');
+    const canArchive = !c.isDM && !c.isDefault && manage;
     const actions = [];
     if (!c.isDM && !c.parentId) actions.push(`<button class="btn" id="add-sub">＋ Add sub-channel</button>`);
-    if (!c.isDM) actions.push(`<button class="btn" id="chan-notify">🔔 Notifications: ${LEVEL_TEXT[levelOf(c)]}</button>`);
+    if (!c.isDM && (!c.isPrivate || manage)) actions.push(`<button class="btn" id="add-people">＋ Add people</button>`);
+    if (!c.isDM) actions.push(`<button class="btn" id="chan-notify">🔔 ${LEVEL_TEXT[levelOf(c)]}</button>`);
     if (canArchive) actions.push(`<button class="btn" id="archive-chan">${c.archived ? 'Unarchive' : '🗄 Archive'}</button>`);
     if (!c.isDM && c.name !== 'general' && !c.isDefault) actions.push(`<button class="btn" id="leave-chan">Leave</button>`);
-    modal(c.isDM ? 'Conversation' : `#${fullLabel(c)}`, (actions.length ? `<div class="detail-actions">${actions.join('')}</div>` : '') + `<h4 class="modal-sub">${c.members.length} member${c.members.length === 1 ? '' : 's'}</h4>` + rows);
+    const privacy = c.isDM ? '' : `<div class="privacy-row ${c.isPrivate ? 'is-private' : ''}">
+        <div class="grow"><strong>${c.isPrivate ? '🔒 Private' : '🌐 Open to everyone'}</strong>
+          <div class="sub">${c.isPrivate ? 'Only the people below can see this channel. It is hidden from everyone else.' : 'Anyone on the team can find and join this channel.'}</div></div>
+        ${manage && !(c.name === 'general' && !c.parentId) ? `<button class="btn" id="toggle-private">${c.isPrivate ? 'Make it open' : 'Make it private'}</button>` : ''}
+      </div>`;
+    modal(c.isDM ? 'Conversation' : `${c.isPrivate ? '🔒 ' : '#'}${fullLabel(c)}`, privacy + (actions.length ? `<div class="detail-actions">${actions.join('')}</div>` : '') + `<h4 class="modal-sub">${c.members.length} member${c.members.length === 1 ? '' : 's'}</h4>` + rows);
     $('#modal-body').onclick = (e) => {
+      const rm = e.target.closest('[data-remove]');
+      if (rm) {
+        const who = S.users[rm.dataset.remove]?.name;
+        if (confirm(`Remove ${who} from this private channel? They will no longer see it.`)) S.socket.emit('channel:removeMember', { channelId: c.id, userId: rm.dataset.remove }, (r) => { if (r.error) toast(r.error); else setTimeout(channelDetails, 200); });
+        return;
+      }
       const r = e.target.closest('[data-user]');
-      if (r && r.dataset.user !== S.me.id) { closeModal(); openDM(r.dataset.user); }
+      if (r && r.dataset.user !== S.me.id && !e.target.closest('button')) { closeModal(); openDM(r.dataset.user); }
       if (e.target.id === 'leave-chan') { S.socket.emit('channel:leave', { channelId: c.id }); closeModal(); }
       if (e.target.id === 'add-sub') channelModal(c.id);
+      if (e.target.id === 'add-people') addPeopleModal(c);
       if (e.target.id === 'chan-notify') channelNotifyModal(c);
+      if (e.target.id === 'toggle-private') {
+        const to = !c.isPrivate;
+        if (to && !confirm(`Make #${fullLabel(c)} private? Only its ${c.members.length} current member${c.members.length === 1 ? '' : 's'} will be able to see it.`)) return;
+        S.socket.emit('channel:privacy', { channelId: c.id, isPrivate: to }, (res) => { if (res.error) toast(res.error); else { toast(to ? '🔒 Channel is now private' : 'Channel is now open to everyone'); setTimeout(channelDetails, 200); } });
+      }
       if (e.target.id === 'archive-chan') {
         if (!c.archived && !confirm(`Archive #${fullLabel(c)}? It will be hidden from the sidebar, but messages stay searchable and you can unarchive it any time.`)) return;
         S.socket.emit('channel:archive', { channelId: c.id, archived: !c.archived }, (res) => { if (res.error) toast(res.error); else { closeModal(); toast(c.archived ? 'Channel archived' : 'Channel unarchived'); } });
       }
     };
-  });
+  }
+  $('#members-btn').addEventListener('click', channelDetails);
+
+  function peoplePicker(exclude = [], preselect = []) {
+    const people = Object.values(S.users).filter((u) => !u.isBot && !exclude.includes(u.id)).sort((a, b) => a.name.localeCompare(b.name));
+    if (!people.length) return '<p class="muted">Everyone on the team is already here.</p>';
+    return `<div class="people-pick">${people.map((u) => `<label class="pick-row">${avatar(u, 'sm')}<span class="grow">${esc(u.name)}<small>${esc(u.title || '')}</small></span><input type="checkbox" value="${u.id}" ${preselect.includes(u.id) ? 'checked' : ''}></label>`).join('')}</div>`;
+  }
+  const pickedIds = (root) => [...root.querySelectorAll('.people-pick input:checked')].map((i) => i.value);
+
+  function addPeopleModal(c) {
+    modal(`Add people to ${c.isPrivate ? '🔒 ' : '#'}${fullLabel(c)}`, peoplePicker(c.members) + `<div class="modal-actions"><button class="btn" id="ap-back">Back</button><button class="btn-gold" id="ap-add">Add</button></div>`);
+    $('#ap-back').onclick = channelDetails;
+    $('#ap-add').onclick = () => {
+      const ids = pickedIds($('#modal-body'));
+      if (!ids.length) return toast('Choose at least one person.');
+      S.socket.emit('channel:addMembers', { channelId: c.id, userIds: ids }, (r) => { if (r.error) toast(r.error); else { toast(`Added ${ids.length} ${ids.length === 1 ? 'person' : 'people'}`); setTimeout(channelDetails, 200); } });
+    };
+  }
   $('#pins-btn').addEventListener('click', () => {
     const list = (S.messages[S.current] || []).filter((m) => m.pinned && !m.deleted);
     modal('Pinned messages', list.length ? list.map(resultRow).join('') : '<p class="muted">Nothing pinned yet. Hover a message and tap 📌 to keep it handy for the team.</p>');
@@ -958,12 +1011,28 @@
       <div class="field">Checklist
         <select id="new-template"><option value="">No checklist</option>${(S.templates || []).map((t) => `<option value="${esc(t.id)}">☑ ${esc(t.name)}</option>`).join('')}</select>
       </div>
+      <div class="field">Who can see it?
+        <div class="seg"><label><input type="radio" name="vis" value="open" checked> 🌐 Everyone</label><label><input type="radio" name="vis" value="private"> 🔒 Only people I choose</label></div>
+      </div>
+      <div id="vis-people" class="hidden"><div class="sub" style="margin-bottom:6px">Choose who can see it (you're included automatically):</div><div id="vis-pick"></div></div>
       <p class="sub" id="sub-hint" style="${parentId ? '' : 'display:none'}">Everyone in the main channel is added automatically. Archive it when the deal closes.</p>
       <p class="error" id="chan-err"></p>
       <div class="modal-actions"><button class="btn-gold" id="create-chan">Create</button></div>
-      ${browse.length ? `<h4 class="modal-sub">Browse channels</h4>${browse.map((c) => `<div class="list-row" data-join="${c.id}"><div class="grow"><strong>${c.parentId ? '⌂' : '#'} ${esc(fullLabel(c))}</strong><div class="sub">${esc(c.topic || '')}${c.topic ? ' · ' : ''}${c.memberCount} member${c.memberCount === 1 ? '' : 's'}</div></div><button class="btn">Join</button></div>`).join('')}` : ''}
+      ${browse.length ? `<h4 class="modal-sub">Browse channels</h4>${browse.map((c) => `<div class="list-row" data-join="${c.id}"><div class="grow"><strong>${c.isPrivate ? '🔒' : c.parentId ? '⌂' : '#'} ${esc(fullLabel(c))}</strong><div class="sub">${esc(c.topic || '')}${c.topic ? ' · ' : ''}${c.memberCount} member${c.memberCount === 1 ? '' : 's'}</div></div><button class="btn">Join</button></div>`).join('')}` : ''}
       ${archived.length ? `<h4 class="modal-sub">Archived</h4>${archived.map((c) => `<div class="list-row" data-arch="${c.id}"><div class="grow"><strong>🗄 ${esc(fullLabel(c))}</strong><div class="sub">${esc(c.topic || '')}</div></div><button class="btn">${S.channels[c.id] ? 'Open' : 'Join'}</button></div>`).join('')}` : ''}`);
     $('#new-chan').focus();
+    const syncVis = () => {
+      const parent = S.channels[$('#new-parent').value];
+      const forced = !!parent?.isPrivate;
+      if (forced) document.querySelector('input[name=vis][value=private]').checked = true;
+      document.querySelectorAll('input[name=vis]').forEach((r) => { r.disabled = forced; });
+      const priv = document.querySelector('input[name=vis]:checked').value === 'private';
+      $('#vis-people').classList.toggle('hidden', !priv);
+      $('#sub-hint').textContent = priv ? 'Only the people you choose (and you) can see it. Archive it when the deal closes.' : 'Everyone in the main channel is added automatically. Archive it when the deal closes.';
+      // Nobody is pre-selected, except when the main channel is itself private (then its members are).
+      if (priv) $('#vis-pick').innerHTML = peoplePicker([S.me.id], parent?.isPrivate ? parent.members : []);
+    };
+    document.querySelectorAll('input[name=vis]').forEach((r) => r.addEventListener('change', syncVis));
     const pickTemplate = () => {
       const parent = S.channels[$('#new-parent').value];
       const want = parent?.name === 'listings' ? 'listing' : /open.?house/i.test(parent?.name || '') ? 'openhouse' : '';
@@ -972,12 +1041,13 @@
     pickTemplate();
     $('#new-parent').onchange = (e) => {
       pickTemplate();
+      syncVis();
       const sub = !!e.target.value;
       $('#name-label').textContent = sub ? 'Address or name' : 'Channel name';
       $('#new-chan').placeholder = sub ? 'e.g. 24 Juniper Crescent' : 'e.g. open-houses';
       $('#sub-hint').style.display = sub ? '' : 'none';
     };
-    const create = () => S.socket.emit('channel:create', { name: $('#new-chan').value, topic: $('#new-topic').value, parentId: $('#new-parent').value || null, templateId: $('#new-template').value }, (r) => {
+    const create = () => S.socket.emit('channel:create', { name: $('#new-chan').value, topic: $('#new-topic').value, parentId: $('#new-parent').value || null, templateId: $('#new-template').value, isPrivate: document.querySelector('input[name=vis]:checked').value === 'private', memberIds: pickedIds($('#modal-body')) }, (r) => {
       if (r.error) return ($('#chan-err').textContent = r.error);
       closeModal();
       setTimeout(() => openChannel(r.id), 50);
@@ -1066,6 +1136,7 @@
           <div class="chip-row" style="margin-top:8px">
             <label class="btn photo-btn">⬆️ ${b.logo ? 'Replace logo' : 'Upload logo'}<input type="file" id="ws-logo-file" accept="image/png,image/jpeg,image/webp" hidden></label>
             ${b.logo ? '<button class="btn danger" id="ws-logo-rm">Remove</button>' : ''}
+            ${b.logo !== '/brand/logo.png' ? '<button class="btn" id="ws-logo-default">Use the Kaizen logo</button>' : ''}
           </div>
           <label class="check-row"><input type="checkbox" id="ws-show-name" ${st.showName ? 'checked' : ''}> Show the workspace name next to the logo</label>
           <div class="sub">Tip: a transparent PNG with light or gold artwork looks best on the dark sidebar.</div>
@@ -1095,6 +1166,7 @@
           S.branding = r.branding; renderBranding(); renderWorkspaceSettings(body); toast('Logo updated');
         } catch (err) { toast(err.message); }
       };
+      if ($('#ws-logo-default')) $('#ws-logo-default').onclick = async () => { const r = await upload({ kind: 'logo', reset: true }); S.branding = r.branding; renderBranding(); renderWorkspaceSettings(body); };
       if ($('#ws-logo-rm')) $('#ws-logo-rm').onclick = async () => { const r = await upload({ kind: 'logo', remove: true }); S.branding = r.branding; renderBranding(); renderWorkspaceSettings(body); };
       $('#ws-save').onclick = () => S.socket.emit('settings:update', { inviteCode: $('#ws-code').value, workspaceName: $('#ws-name-input').value, showName: $('#ws-show-name').checked }, (r) => r.error ? toast(r.error) : toast('Workspace saved'));
       // Checklist templates

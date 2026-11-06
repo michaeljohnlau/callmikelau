@@ -160,9 +160,13 @@ function mountIntegrations(app, core) {
       const m = body.uri.match(/[?&]id=([\d,]+)/) || body.uri.match(/\/people\/(\d+)/);
       if (m) ids = m[1].split(',');
     }
-    for (const id of ids.slice(0, 25)) {
-      postLead(Number(id)).catch((e) => console.error('FUB lead post failed', id, e.message));
-    }
+    // Wait a few seconds: some lead sources add the inquiry (address, message) just after the contact.
+    const delay = Number(process.env.FUB_LEAD_DELAY_MS ?? 5000);
+    setTimeout(() => {
+      for (const id of ids.slice(0, 25)) {
+        postLead(Number(id)).catch((e) => console.error('FUB lead post failed', id, e.message));
+      }
+    }, delay);
   });
 
   // ----- Admin controls (called from the Settings screen) -----

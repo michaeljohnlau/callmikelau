@@ -267,7 +267,7 @@ function mountMcp(app, core) {
       description: 'The team forecast vs goal for the year (GCI and deals, per agent), urgent items, and hot leads with Follow Up Boss links.',
       annotations: { readOnlyHint: true },
     }, async () => {
-      const d = core.dashboard();
+      const d = core.dashboard(bot);
       return text({
         year: d.year, team: d.team,
         agents: d.agents.map(({ userId, updatedAt, ...a }) => a),

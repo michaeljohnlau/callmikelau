@@ -116,7 +116,11 @@ db.checklistTemplates = db.checklistTemplates || JSON.parse(JSON.stringify(DEFAU
 
 const inviteCode = () => (db.settings.inviteCode || INVITE_CODE || '').trim();
 const workspaceName = () => db.settings.workspaceName || WORKSPACE_NAME;
-const branding = () => ({ name: workspaceName(), logo: db.settings.logo ? '/uploads/' + db.settings.logo : '', showName: db.settings.showName !== false });
+const branding = () => ({
+  name: workspaceName(),
+  logo: db.settings.logo === 'none' ? '' : db.settings.logo ? '/uploads/' + db.settings.logo : '/brand/logo.png',
+  showName: db.settings.showName === true,
+});
 
 // ---------- Push notifications (VAPID keys are generated once and saved) ----------
 const VAPID_FILE = path.join(DATA_DIR, 'vapid.json');
@@ -185,8 +189,12 @@ let io; // set below
 function canSee(user, channel) {
   if (!channel || !user) return false;
   if (channel.members.includes(user.id)) return true;
-  return !!user.isBot && !channel.isDM; // bots can read any public channel
+  if (channel.isDM) return false;
+  if (user.integration) return true; // e.g. Follow Up Boss can post lead alerts to any channel it's set up for
+  return !!user.isBot && !channel.isPrivate; // AI assistants can read public channels only
 }
+// Channels a person can find in "Browse": public ones, plus private ones for admins.
+const canBrowse = (user, c) => !c.isDM && !c.members.includes(user.id) && (!c.isPrivate || user.isAdmin);
 
 function channelSlug(s) {
   return String(s || '').toLowerCase().trim().replace(/^#/, '').replace(/[^a-z0-9-_]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
@@ -213,10 +221,10 @@ function channelView(c, user) {
   return {
     id: c.id, name: c.name, label: c.label || '', topic: c.topic, isDM: c.isDM, members: c.members, createdBy: c.createdBy,
     parentId: c.parentId || null, archived: !!c.archived, isDefault: !!c.isDefault, unread, mentions,
-    checklist: c.checklist || null,
+    checklist: c.checklist || null, isPrivate: !!c.isPrivate,
   };
 }
-const browseView = (c) => ({ id: c.id, name: c.name, label: c.label || '', topic: c.topic, parentId: c.parentId || null, archived: !!c.archived, memberCount: c.members.length });
+const browseView = (c) => ({ id: c.id, name: c.name, label: c.label || '', topic: c.topic, parentId: c.parentId || null, archived: !!c.archived, isPrivate: !!c.isPrivate, memberCount: c.members.length });
 
 function messageView(m) {
   return {
@@ -254,6 +262,21 @@ function isWatching(userId) {
   return false;
 }
 
+function badgeCount(u) {
+  let total = 0;
+  for (const c of Object.values(db.channels)) {
+    if (!c.members.includes(u.id)) continue;
+    const lvl = levelFor(u, c);
+    if (lvl === 'mute') continue;
+    const last = u.lastRead?.[c.id] || 0;
+    for (const m of db.messages) {
+      if (m.channelId !== c.id || m.parentId || m.deleted || m.ts <= last || m.userId === u.id) continue;
+      if (c.isDM || lvl === 'all' || (m.mentions || []).some((id) => id === u.id || id === '*')) total++;
+    }
+  }
+  return total;
+}
+
 function pushTo(userId, payload) {
   const u = db.users[userId];
   if (!u?.push?.length || isWatching(userId)) return;
@@ -287,7 +310,7 @@ function notifyRecipients(c, m, sender) {
   const where = c.isDM ? sender.name : `${sender.name} in #${displayName(c)}`;
   for (const id of c.members) {
     if (!shouldNotify(db.users[id], c, m)) continue;
-    pushTo(id, { title: m.parentId ? `${where} (thread)` : where, body: m.text.slice(0, 180), channelId: c.id, tag: c.id });
+    pushTo(id, { title: m.parentId ? `${where} (thread)` : where, body: m.text.slice(0, 180), channelId: c.id, tag: c.id, badge: badgeCount(db.users[id]) });
   }
 }
 
@@ -376,7 +399,8 @@ const currentYear = () => Number(new Date().toLocaleString('en-CA', { timeZone: 
 const GOAL_FIELDS = ['goalGci', 'goalDeals', 'closedGci', 'closedDeals', 'pendingGci', 'pendingDeals'];
 let hotFromFub = () => []; // replaced by the Follow Up Boss integration
 
-function dashboard() {
+function dashboard(viewer) {
+  const visible = (c) => !viewer || canSee(viewer, c);
   const year = currentYear();
   const g = db.goals[year] || {};
   const people = Object.values(db.users).filter((u) => !u.isBot && !u.disabled);
@@ -397,7 +421,7 @@ function dashboard() {
   for (const m of db.messages) {
     if (!m.tasks || m.deleted || m.ts < since) continue;
     const c = db.channels[m.channelId];
-    if (!c || c.archived) continue;
+    if (!c || c.archived || !visible(c)) continue;
     for (const t of m.tasks) {
       if (t.doneBy) continue;
       const overdue = t.claimedBy && now - (t.claimedAt || m.ts) > 864e5;
@@ -420,7 +444,7 @@ function dashboard() {
   const seen = new Set();
   for (const h of hotFromFub()) { if (!seen.has(h.personId)) { seen.add(h.personId); hot.push(h); } }
   for (const m of db.messages) {
-    if (!m.hot || m.deleted || !m.lead) continue;
+    if (!m.hot || m.deleted || !m.lead || !visible(db.channels[m.channelId])) continue;
     const key = m.lead.personId || m.id;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -432,7 +456,10 @@ function dashboard() {
 let dashTimer = null;
 function dashboardChanged() {
   if (dashTimer || !io) return;
-  dashTimer = setTimeout(() => { dashTimer = null; io.emit('dashboard', dashboard()); }, 250);
+  dashTimer = setTimeout(() => {
+    dashTimer = null;
+    for (const s of io.sockets.sockets.values()) { const u = db.users[s.data.userId]; if (u) s.emit('dashboard', dashboard(u)); }
+  }, 250);
 }
 
 function parseTemplate(t) {
@@ -462,7 +489,7 @@ function checklistChanged(c) {
   emitToChannel(c, 'channel:checklist', { channelId: c.id, checklist: c.checklist || null });
 }
 
-function createChannel(user, { name, topic, parentId, templateId }) {
+function createChannel(user, { name, topic, parentId, templateId, isPrivate, memberIds }) {
   const parent = parentId ? db.channels[parentId] : null;
   if (parentId && (!parent || parent.isDM || parent.parentId)) throw new Error('Sub-channels can only be added under a main channel.');
   if (parent && !canSee(user, parent)) throw new Error('Join the parent channel first.');
@@ -472,10 +499,16 @@ function createChannel(user, { name, topic, parentId, templateId }) {
   const clash = Object.values(db.channels).some((c) => !c.isDM && (c.parentId || null) === (parentId || null) && c.name === slug);
   if (clash) throw new Error(parent ? `#${parent.name} already has a sub-channel with that name.` : 'That channel already exists.');
   const id = uid();
-  const members = parent ? [...new Set([...parent.members.filter((mid) => !db.users[mid]?.isBot), user.id])] : [user.id];
+  // Private channels: only the people chosen (sub-channels of a private channel are private too).
+  const priv = !!isPrivate || !!parent?.isPrivate;
+  const chosen = Array.isArray(memberIds) ? memberIds.filter((mid) => db.users[mid] && !db.users[mid].disabled && !db.users[mid].isBot) : null;
+  let members;
+  if (priv && chosen) members = [...new Set([...chosen, user.id])];
+  else if (parent) members = [...new Set([...parent.members.filter((mid) => !db.users[mid]?.isBot), user.id])];
+  else members = [user.id];
   const c = {
     id, name: slug, label: parent && label !== slug ? label : '', topic: String(topic || '').slice(0, 200), isDM: false,
-    members, createdBy: user.id, createdAt: Date.now(), parentId: parent ? parent.id : null,
+    members, createdBy: user.id, createdAt: Date.now(), parentId: parent ? parent.id : null, isPrivate: priv,
   };
   // Sub-channels under #listings get the "New listing" checklist unless told otherwise.
   if (templateId === undefined && parent?.name === 'listings' && db.checklistTemplates.listing) templateId = 'listing';
@@ -483,7 +516,7 @@ function createChannel(user, { name, topic, parentId, templateId }) {
   db.channels[id] = c;
   save();
   for (const mid of members) emitToUser(mid, 'channel:joined', channelView(c, db.users[mid]));
-  for (const s of io.sockets.sockets.values()) if (!members.includes(s.data.userId)) s.emit('channel:available', browseView(c));
+  for (const s of io.sockets.sockets.values()) { const u = db.users[s.data.userId]; if (u && canBrowse(u, c)) s.emit('channel:available', browseView(c)); }
   return c;
 }
 
@@ -532,7 +565,8 @@ app.post('/api/upload', express.json({ limit: '2mb' }), (req, res) => {
     if (kind === 'logo') {
       if (!user.isAdmin) return res.status(403).json({ error: 'Admins only.' });
       const old = db.settings.logo;
-      if (remove) db.settings.logo = '';
+      if (req.body.reset) db.settings.logo = '';
+      else if (remove) db.settings.logo = 'none';
       else {
         const { buf, ext } = decodeImage(dataUrl);
         const file = `logo-${Date.now().toString(36)}.${ext}`;
@@ -629,7 +663,7 @@ mountMcp(app, {
   },
   canSee, displayName, messageView, postMessage, createChannel, channelSlug, updateTask,
   checklistChanged, applyTemplate, uid, templates: () => db.checklistTemplates,
-  dashboard: () => dashboard(),
+  dashboard: (viewer) => dashboard(viewer),
 });
 
 const integrations = mountIntegrations(app, {
@@ -676,11 +710,11 @@ io.on('connection', (socket) => {
     me: publicUser(user),
     storageWarning: user.isAdmin ? storage.warning : null,
     prefs: prefsOf(user),
-    dashboard: dashboard(),
+    dashboard: dashboard(user),
     users: Object.values(db.users).filter((u) => !u.disabled).map(publicUser),
     online: [...online.keys()],
     channels: Object.values(db.channels).filter((c) => c.members.includes(user.id)).map((c) => channelView(c, user)),
-    browse: Object.values(db.channels).filter((c) => !c.isDM && !c.members.includes(user.id)).map(browseView),
+    browse: Object.values(db.channels).filter((c) => canBrowse(user, c)).map(browseView),
   });
 
   socket.on('history', ({ channelId, before }, cb) => {
@@ -836,7 +870,7 @@ io.on('connection', (socket) => {
   });
   socket.on('settings:get', (_, cb) => {
     if (!me().isAdmin) return cb?.({ error: 'Admins only.' });
-    cb?.({ inviteCode: inviteCode(), envCode: !!INVITE_CODE && !db.settings.inviteCode, workspaceName: workspaceName(), showName: db.settings.showName !== false });
+    cb?.({ inviteCode: inviteCode(), envCode: !!INVITE_CODE && !db.settings.inviteCode, workspaceName: workspaceName(), showName: db.settings.showName === true });
   });
   socket.on('settings:update', (patch, cb) => {
     if (!me().isAdmin) return cb?.({ error: 'Admins only.' });
@@ -888,15 +922,71 @@ io.on('connection', (socket) => {
     for (const id of c.members) if (id !== me().id) emitToUser(id, 'typing', { channelId, parentId: parentId || null, userId: me().id });
   });
 
-  socket.on('channel:create', ({ name, topic, parentId, templateId }, cb) => {
-    try { const c = createChannel(me(), { name, topic, parentId, templateId }); ok(cb, { id: c.id }); } catch (e) { fail(cb, e); }
+  socket.on('channel:create', ({ name, topic, parentId, templateId, isPrivate, memberIds }, cb) => {
+    try { const c = createChannel(me(), { name, topic, parentId, templateId, isPrivate, memberIds }); ok(cb, { id: c.id }); } catch (e) { fail(cb, e); }
+  });
+
+  // ----- Private channels: who can see a channel -----
+  const canManage = (c) => c && !c.isDM && (c.createdBy === me().id || me().isAdmin);
+  function grant(c, uid2) {
+    if (c.members.includes(uid2)) return;
+    c.members.push(uid2);
+    emitToUser(uid2, 'channel:joined', channelView(c, db.users[uid2]));
+  }
+  function revoke(c, uid2) {
+    if (!c.members.includes(uid2)) return;
+    c.members = c.members.filter((x) => x !== uid2);
+    const u = db.users[uid2];
+    emitToUser(uid2, 'channel:removed', { channelId: c.id, browse: u && canBrowse(u, c) ? browseView(c) : null });
+  }
+  socket.on('channel:privacy', ({ channelId, isPrivate }, cb) => {
+    const c = db.channels[channelId];
+    if (!canManage(c)) return cb?.({ error: 'Only the person who created this channel or an admin can change who sees it.' });
+    if (c.name === 'general' && !c.parentId && isPrivate) return cb?.({ error: '#general is always open to everyone.' });
+    c.isPrivate = !!isPrivate;
+    save();
+    emitToChannel(c, 'channel:privacy', { channelId: c.id, isPrivate: c.isPrivate });
+    for (const s of io.sockets.sockets.values()) {
+      const u = db.users[s.data.userId];
+      if (!u || c.members.includes(u.id)) continue;
+      if (canBrowse(u, c)) s.emit('channel:available', browseView(c)); else s.emit('channel:removed', { channelId: c.id, browse: null });
+    }
+    dashboardChanged();
+    cb?.({ ok: true });
+  });
+  socket.on('channel:addMembers', ({ channelId, userIds }, cb) => {
+    const c = db.channels[channelId];
+    if (!c || c.isDM || !canSee(me(), c)) return cb?.({ error: 'Not found' });
+    if (c.isPrivate && !canManage(c)) return cb?.({ error: 'Only the person who created this channel or an admin can add people.' });
+    const ids = (Array.isArray(userIds) ? userIds : []).filter((x) => db.users[x] && !db.users[x].disabled);
+    for (const x of ids) {
+      grant(c, x);
+      // Adding someone to a channel also gives them its sub-channels that share its privacy.
+      for (const sub of Object.values(db.channels)) if (sub.parentId === c.id && !sub.archived && !!sub.isPrivate === !!c.isPrivate) grant(sub, x);
+    }
+    save();
+    emitToChannel(c, 'channel:members', { channelId: c.id, members: c.members });
+    dashboardChanged();
+    cb?.({ ok: true });
+  });
+  socket.on('channel:removeMember', ({ channelId, userId }, cb) => {
+    const c = db.channels[channelId];
+    if (!canManage(c)) return cb?.({ error: 'Only the person who created this channel or an admin can remove people.' });
+    if (userId === c.createdBy && !me().isAdmin) return cb?.({ error: "The channel's creator can't be removed." });
+    revoke(c, userId);
+    for (const sub of Object.values(db.channels)) if (sub.parentId === c.id && sub.isPrivate) revoke(sub, userId);
+    save();
+    emitToChannel(c, 'channel:members', { channelId: c.id, members: c.members });
+    dashboardChanged();
+    cb?.({ ok: true });
   });
 
   socket.on('channel:join', ({ channelId }, cb) => {
     const c = db.channels[channelId];
     if (!c || c.isDM) return cb?.({ error: 'Not found' });
-    // Joining a main channel also joins its active sub-channels.
-    const subs = Object.values(db.channels).filter((x) => x.parentId === c.id && !x.archived);
+    if (c.isPrivate && !me().isAdmin) return cb?.({ error: 'This channel is private. Ask its creator to add you.' });
+    // Joining a main channel also joins its active public sub-channels.
+    const subs = Object.values(db.channels).filter((x) => x.parentId === c.id && !x.archived && !x.isPrivate);
     for (const ch of [c, ...subs]) {
       if (!ch.members.includes(me().id)) ch.members.push(me().id);
       emitToChannel(ch, 'channel:members', { channelId: ch.id, members: ch.members });
@@ -913,10 +1003,11 @@ io.on('connection', (socket) => {
     for (const ch of [c, ...subs]) {
       if (!ch.members.includes(me().id)) continue;
       ch.members = ch.members.filter((id) => id !== me().id);
-      socket.emit('channel:left', { channelId: ch.id, ...browseView(ch) });
+      socket.emit('channel:removed', { channelId: ch.id, browse: canBrowse(me(), ch) ? browseView(ch) : null });
       emitToChannel(ch, 'channel:members', { channelId: ch.id, members: ch.members });
     }
     save();
+    dashboardChanged();
   });
 
   socket.on('channel:topic', ({ channelId, topic }) => {

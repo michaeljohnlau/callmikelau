@@ -16,6 +16,8 @@ Private, real-time team chat for **Kaizen Real Estate Team**. It gives the team 
   - Each tick shows who did it and when. Admins edit the templates under **Settings → Workspace**.
 - **Branding & photos:** admins upload the workspace logo. Everyone can add a profile photo, which is shrunk to about 3–10 KB on the device before upload.
 - **Sign-up code:** admins set it under **Settings → Workspace** (not case-sensitive). It overrides the `INVITE_CODE` environment variable.
+- **Private channels:** when creating a channel or sub-channel, choose **🔒 Only people I choose**. A private channel is hidden from everyone else: it doesn't appear in their sidebar, Browse, search, the dashboard, or to AI assistants. Its creator or an admin can add or remove people, or make it open, under 👥 in the channel header. Admins can still find private channels in Browse.
+- **App-icon badge:** each push notification carries your unread count. DMs and channels set to *All messages* count every message; *Mentions only* channels count mentions. The number shows on the app icon on iPhone (Home Screen app, iOS 16.4+) and desktop, and on Android where the launcher supports it.
 - **Notification controls:** set each channel to *All messages*, *Mentions only* or *Muted* (sub-channels follow their main channel unless changed). Choose from 6 sounds and pause notifications for 30 min, 1 hour, 2 hours or until tomorrow at 8am. Find these under the 🔔 in the sidebar or the channel header.
 - **AI assistants (MCP):** connect Grok or any MCP-capable assistant. See below.
 - **Direct messages:** one-on-one chats, plus "notes to self."
@@ -47,7 +49,7 @@ Push notifications go out for **direct messages, @mentions, @here/@channel and t
 2. In Kaizen HQ, signed in as an admin and **from your live https address**, go to **🔔 Settings → Integrations → Follow Up Boss**. Paste the key, pick the channel (default `#leads`) and press **Connect**.
 3. Press **Post a test lead** to see your most recent contact posted.
 
-Kaizen HQ registers a `peopleCreated` webhook with Follow Up Boss. Every new lead is then posted with name, phone, email, source, stage, price, address, tags and a link back to Follow Up Boss. The assigned agent is @mentioned, so they get a push notification. Retries never post a lead twice.
+Kaizen HQ registers a `peopleCreated` webhook with Follow Up Boss. About 5 seconds after a lead is created (so its inquiry details are complete), it is posted with name, phone, email, source, stage, price, address, tags and a link back to Follow Up Boss. The assigned agent is @mentioned, so they get a push notification. Retries never post a lead twice.
 
 **First steps (lead playbooks).** Each lead is sorted as a **seller**, **buyer** or **other** lead, using the inquiry type, tags, source and stage. It is then posted with a checklist:
 

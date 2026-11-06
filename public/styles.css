@@ -262,7 +262,7 @@ textarea:disabled { cursor: not-allowed; }
 
 /* ---------- Branding ---------- */
 .ws-brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.ws-logo { max-height: 40px; max-width: 170px; object-fit: contain; display: block; }
+.ws-logo { max-height: 44px; max-width: 180px; object-fit: contain; display: block; }
 .ws-brand.has-logo .ws-name { font-size: 17px; }
 .ws-brand.has-logo .ws-name::after { display: none; }
 .brand-mark img { max-width: 100%; max-height: 100%; object-fit: contain; }
@@ -314,6 +314,21 @@ body.thread-open .checklist { display: none; }
   .checklist { position: fixed; top: 0; right: 0; bottom: 0; width: min(420px, 100%); z-index: 12; box-shadow: -10px 0 40px rgba(0,0,0,.25); padding-top: env(safe-area-inset-top); }
   body.thread-open .checklist { display: flex; }
 }
+
+/* ---------- Private channels ---------- */
+.hash.lock { font-size: 11px; opacity: .85; }
+.privacy-row { display: flex; gap: 10px; align-items: center; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; margin-bottom: 12px; }
+.privacy-row.is-private { border-color: var(--gold); background: var(--mention-bg); }
+.privacy-row .grow { flex: 1; min-width: 0; }
+.seg { display: flex; gap: 6px; flex-wrap: wrap; font-weight: 500; }
+.seg label { flex: 1 1 200px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; cursor: pointer; font-size: 14px; white-space: nowrap; }
+.seg label:has(input:checked) { border-color: var(--gold); background: var(--mention-bg); }
+.people-pick { max-height: 260px; overflow-y: auto; border: 1px solid var(--line); border-radius: 10px; margin-bottom: 10px; }
+.pick-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--line); cursor: pointer; font-size: 14px; }
+.pick-row:last-child { border-bottom: 0; }
+.pick-row:hover { background: var(--bg-hover); }
+.pick-row small { display: block; color: var(--muted); font-size: 12px; }
+.pick-row input { width: 18px; height: 18px; accent-color: var(--gold-dark); }
 
 /* ---------- Dashboard bar ---------- */
 .dash { background: var(--charcoal); color: #e9e2d4; border-bottom: 1px solid #000; padding-top: env(safe-area-inset-top); }
