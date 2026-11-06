@@ -196,8 +196,10 @@ function mountMcp(app, core) {
     return server;
   }
 
+  // The key can come from the Authorization header (preferred) or be part of the URL
+  // (/mcp/<key>) for apps like grok.com Connectors that only let you paste a link.
   function auth(req, res) {
-    const key = (req.get('authorization') || '').replace(/^Bearer\s+/i, '').trim();
+    const key = (req.get('authorization') || '').replace(/^Bearer\s+/i, '').trim() || req.params.key || '';
     const bot = core.botFromKey(key);
     if (!bot) {
       res.status(401).json({ jsonrpc: '2.0', error: { code: -32001, message: 'Invalid or missing bot key. Create one in Kaizen HQ → Settings → AI assistants.' }, id: null });
@@ -206,7 +208,7 @@ function mountMcp(app, core) {
     return bot;
   }
 
-  app.post('/mcp', async (req, res) => {
+  const handle = async (req, res) => {
     const bot = auth(req, res);
     if (!bot) return;
     const server = buildServer(bot);
@@ -219,11 +221,13 @@ function mountMcp(app, core) {
       console.error('MCP error', e);
       if (!res.headersSent) res.status(500).json({ jsonrpc: '2.0', error: { code: -32603, message: 'Internal error' }, id: null });
     }
-  });
+  };
+  app.post('/mcp', handle);
+  app.post('/mcp/:key', handle);
 
   const notAllowed = (req, res) => res.status(405).set('Allow', 'POST').json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed.' }, id: null });
-  app.get('/mcp', notAllowed);
-  app.delete('/mcp', notAllowed);
+  app.get(['/mcp', '/mcp/:key'], notAllowed);
+  app.delete(['/mcp', '/mcp/:key'], notAllowed);
 }
 
 module.exports = { mountMcp };

@@ -36,9 +36,9 @@ Push notifications go out for **direct messages, @mentions, @here/@channel and t
 Kaizen HQ includes an MCP server at `https://<your-domain>/mcp` (Streamable HTTP).
 
 1. Sign in as an admin, then go to **🔔 Settings → AI assistants → Create key**. Copy the key; it is only shown once.
-2. In Grok or another MCP client, add a **remote MCP server**:
-   - URL: `https://<your-domain>/mcp`
-   - Header: `Authorization: Bearer <key>`
+2. Connect it:
+   - **Grok chat (grok.com → Connectors → New Connector → Custom):** paste the single link shown after creating the key, `https://<your-domain>/mcp/<key>`.
+   - **Grok Bot, xAI API, Claude or other MCP apps that support headers:** URL `https://<your-domain>/mcp` with header `Authorization: Bearer <key>`.
 3. The assistant appears in the team list with an **AI** tag. Remove it any time from the same screen and its key stops working immediately.
 
 **Tools it gets:** `list_channels`, `read_messages`, `read_thread`, `search_messages`, `get_my_mentions` (who @mentioned it and whether it has answered yet), `send_message` (including thread replies), `create_channel` (including listing sub-channels) and `list_team`.

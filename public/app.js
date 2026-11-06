@@ -644,7 +644,9 @@
             if (res.error) return toast(res.error);
             $('#bot-new').innerHTML = `<div class="key-box"><div class="set-title">🔑 ${esc(res.bot.name)}'s key: copy it now, it won't be shown again</div>
               <div class="copy-row"><code>${esc(res.key)}</code><button class="btn" data-copy="${esc(res.key)}">Copy</button></div>
-              <div class="sub">In Grok (or any MCP client), add a remote MCP server with URL <code>${esc(url)}</code> and header <code>Authorization: Bearer &lt;key&gt;</code>.</div></div>`;
+              <div class="set-title" style="margin-top:12px">Grok chat (grok.com → Connectors → Custom): paste this one link</div>
+              <div class="copy-row"><code>${esc(url + '/' + res.key)}</code><button class="btn" data-copy="${esc(url + '/' + res.key)}">Copy</button></div>
+              <div class="sub">For Grok Bot, the xAI API or other MCP apps that support headers, use the URL <code>${esc(url)}</code> with header <code>Authorization: Bearer &lt;key&gt;</code> instead. Keep both private: anyone with them can read and post in your public channels.</div></div>`;
           });
         }
       };
