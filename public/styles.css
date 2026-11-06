@@ -260,6 +260,14 @@ mark { background: var(--mention-bg); color: inherit; font-weight: 600; }
 .bell-big { font-size: 44px; }
 textarea:disabled { cursor: not-allowed; }
 
+/* ---------- Integrations ---------- */
+.int-head { display: flex; gap: 12px; align-items: center; margin-bottom: 10px; }
+.int-logo { width: 40px; height: 40px; border-radius: 10px; background: var(--charcoal); color: var(--gold); display: grid; place-items: center; font-weight: 800; font-size: 12px; letter-spacing: .04em; flex: none; }
+.fub-status { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.fub-status.ok { border-color: #3fae6a; }
+.fub-status.warn { border-color: var(--gold); background: var(--mention-bg); }
+.adv summary { cursor: pointer; font-size: 13px; color: var(--muted); }
+
 /* ---------- Install / notification banners ---------- */
 .main .app-banner { margin: 10px 20px 0; }
 .app-banner.warn { background: #3a1d17; border-color: #b4483c; color: #f6ddd7; font-weight: 500; }

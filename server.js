@@ -9,6 +9,7 @@ const crypto = require('crypto');
 const { Server } = require('socket.io');
 const webpush = require('web-push');
 const { mountMcp } = require('./mcp');
+const { mountIntegrations } = require('./integrations');
 
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -110,7 +111,7 @@ const LEVELS = ['all', 'mentions', 'mute'];
 const SOUNDS = ['chime', 'ding', 'pop', 'marimba', 'soft', 'none'];
 
 function publicUser(u) {
-  return { id: u.id, name: u.name, email: u.isBot ? '' : u.email, title: u.title || '', color: u.color, isAdmin: !!u.isAdmin, isBot: !!u.isBot, status: u.status || '' };
+  return { id: u.id, name: u.name, email: u.isBot ? '' : u.email, title: u.title || '', color: u.color, isAdmin: !!u.isAdmin, isBot: !!u.isBot, integration: u.integration || null, status: u.status || '' };
 }
 
 function prefsOf(u) {
@@ -367,6 +368,12 @@ mountMcp(app, {
   canSee, displayName, messageView, postMessage, createChannel, channelSlug,
 });
 
+const integrations = mountIntegrations(app, {
+  get db() { return db; },
+  save, postMessage, publicUser,
+  io: () => io,
+});
+
 const server = http.createServer(app);
 io = new Server(server);
 
@@ -603,6 +610,16 @@ io.on('connection', (socket) => {
     io.emit('user:remove', { id: botId });
     cb?.({ ok: true });
   });
+
+  // ----- Admin: Follow Up Boss lead alerts -----
+  const adminOnly = (fn) => async (data, cb) => {
+    if (!me().isAdmin) return cb?.({ error: 'Admins only.' });
+    try { cb?.({ ok: true, ...(await fn(data || {})) }); } catch (e) { cb?.({ error: e.message }); }
+  };
+  socket.on('fub:status', adminOnly(async () => ({ status: integrations.status() })));
+  socket.on('fub:connect', adminOnly(async (d) => ({ status: await integrations.connect(d) })));
+  socket.on('fub:disconnect', adminOnly(async () => ({ status: await integrations.disconnect() })));
+  socket.on('fub:test', adminOnly(async () => integrations.test()));
 
   socket.data.visible = true;
   socket.on('visible', ({ visible }) => { socket.data.visible = !!visible; });

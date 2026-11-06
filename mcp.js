@@ -208,6 +208,28 @@ function mountMcp(app, core) {
     return bot;
   }
 
+  // Simple REST API for tools like Zapier or Make, using the same keys:
+  //   POST /api/v1/messages  { "channel": "leads", "text": "Hello", "thread_id": "optional" }
+  //   GET  /api/v1/channels
+  app.post('/api/v1/messages', (req, res) => {
+    const bot = auth(req, res);
+    if (!bot) return;
+    const { channel, text: body, thread_id } = req.body || {};
+    const c = resolveChannel(bot, channel);
+    if (!c) return res.status(404).json({ error: `Channel "${channel}" not found.` });
+    try {
+      const m = core.postMessage(bot, c.id, body, thread_id);
+      res.json({ ok: true, message_id: m.id, channel: core.displayName(c) });
+    } catch (e) {
+      res.status(400).json({ error: e.message });
+    }
+  });
+  app.get('/api/v1/channels', (req, res) => {
+    const bot = auth(req, res);
+    if (!bot) return;
+    res.json(Object.values(core.db.channels).filter((c) => !c.isDM && !c.archived && core.canSee(bot, c)).map(channelInfo));
+  });
+
   const handle = async (req, res) => {
     const bot = auth(req, res);
     if (!bot) return;

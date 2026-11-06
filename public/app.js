@@ -286,7 +286,7 @@
   $('#members-btn').addEventListener('click', () => {
     const c = S.channels[S.current];
     const rows = c.members.map((id) => S.users[id]).filter(Boolean).sort((a, b) => a.name.localeCompare(b.name)).map((u) =>
-      `<div class="list-row" data-user="${u.id}">${avatar(u)}<div class="grow"><div><strong>${esc(u.name)}</strong>${u.isBot ? ' <span class="tag">AI</span>' : ''}${u.id === S.me.id ? ' <span class="muted">(you)</span>' : ''}</div><div class="sub">${esc(u.title || '')}${S.online.has(u.id) ? ' · <span style="color:var(--online)">Active</span>' : ''}</div></div></div>`).join('');
+      `<div class="list-row" data-user="${u.id}">${avatar(u)}<div class="grow"><div><strong>${esc(u.name)}</strong>${u.isBot ? ` <span class="tag">${u.integration ? 'App' : 'AI'}</span>` : ''}${u.id === S.me.id ? ' <span class="muted">(you)</span>' : ''}</div><div class="sub">${esc(u.title || '')}${S.online.has(u.id) ? ' · <span style="color:var(--online)">Active</span>' : ''}</div></div></div>`).join('');
     const canArchive = !c.isDM && !c.isDefault && (c.createdBy === S.me.id || S.me.isAdmin);
     const actions = [];
     if (!c.isDM && !c.parentId) actions.push(`<button class="btn" id="add-sub">＋ Add sub-channel</button>`);
@@ -364,7 +364,7 @@
       <div class="msg-gutter">${avatar(u, 'lg')}<div class="time-hover">${fmtTime(m.ts).replace(/\s?[AP]M/i, '')}</div></div>
       <div class="msg-body">
         ${m.pinned && !m.deleted ? '<div class="pin-flag">📌 Pinned</div>' : ''}
-        <div class="msg-head"><span class="msg-author" data-user="${m.userId}">${esc(u?.name || 'Unknown')}</span>${u?.isBot ? '<span class="tag">AI</span>' : ''}${u?.title ? `<span class="msg-role">${esc(u.title)}</span>` : ''}<span class="msg-time" title="${new Date(m.ts).toLocaleString()}">${fmtTime(m.ts)}</span></div>
+        <div class="msg-head"><span class="msg-author" data-user="${m.userId}">${esc(u?.name || 'Unknown')}</span>${u?.isBot ? `<span class="tag">${u.integration ? 'App' : 'AI'}</span>` : ''}${u?.title ? `<span class="msg-role">${esc(u.title)}</span>` : ''}<span class="msg-time" title="${new Date(m.ts).toLocaleString()}">${fmtTime(m.ts)}</span></div>
         ${body}
         ${reactions || thread ? `<div class="reactions">${reactions}${reactions ? '<button class="reaction add" data-act="react" title="Add reaction">＋</button>' : ''}</div>${thread}` : ''}
       </div>
@@ -538,13 +538,75 @@
 
   // ---------- Settings (notifications, profile, AI assistants) ----------
   function openSettings(tab = 'notifications') {
-    const tabs = [['notifications', 'Notifications'], ['profile', 'Profile'], ...(S.me.isAdmin ? [['ai', 'AI assistants']] : [])];
+    const tabs = [['notifications', 'Notifications'], ['profile', 'Profile'], ...(S.me.isAdmin ? [['integrations', 'Integrations'], ['ai', 'AI & API']] : [])];
     modal('Settings', `<div class="tabs">${tabs.map(([k, t]) => `<button data-tab="${k}" class="${k === tab ? 'active' : ''}">${t}</button>`).join('')}</div><div id="settings-body"></div>`);
     $('.tabs', $('#modal-body')).onclick = (e) => { const b = e.target.closest('[data-tab]'); if (b) openSettings(b.dataset.tab); };
     const body = $('#settings-body');
     if (tab === 'notifications') renderNotifySettings(body);
     if (tab === 'profile') renderProfileSettings(body);
     if (tab === 'ai') renderAISettings(body);
+    if (tab === 'integrations') renderIntegrations(body);
+  }
+
+  function renderIntegrations(body) {
+    body.innerHTML = '<p class="muted">Loading…</p>';
+    S.socket.emit('fub:status', {}, (r) => {
+      if (r.error) { body.innerHTML = `<p class="error">${esc(r.error)}</p>`; return; }
+      const st = r.status || {};
+      const chans = Object.values(S.channels).filter((c) => !c.isDM && !c.archived).sort((a, b) => fullLabel(a).localeCompare(fullLabel(b)));
+      const defaultChan = st.channelId || chans.find((c) => c.name === 'leads')?.id || chans[0]?.id;
+      const chanName = st.channelId && S.channels[st.channelId] ? '#' + fullLabel(S.channels[st.channelId]) : '';
+      const statusHtml = !st.connected ? '<div class="sub">Not connected.</div>' : `
+        <div class="fub-status ${st.webhook ? 'ok' : 'warn'}">
+          <div><strong>${st.webhook ? '✅ Live' : '⚠️ Connected, but lead alerts are not active yet'}</strong></div>
+          <div class="sub">Account: ${esc(st.account)} · Key ${esc(st.keyHint)} · Posting to ${esc(chanName || '(choose a channel)')}</div>
+          ${st.lastLeadAt ? `<div class="sub">Last lead posted ${fmtDay(st.lastLeadAt)} ${fmtTime(st.lastLeadAt)}</div>` : ''}
+          ${st.webhookNote ? `<div class="sub" style="margin-top:6px">${esc(st.webhookNote)}</div>` : ''}
+        </div>`;
+      body.innerHTML = `
+        <div class="set-block">
+          <div class="int-head"><div class="int-logo">FUB</div><div><div class="set-title" style="margin:0">Follow Up Boss</div><div class="sub">Post every new lead to a channel, and @mention the assigned agent.</div></div></div>
+          ${statusHtml}
+          <div class="field" style="margin-top:12px">Follow Up Boss API key
+            <input id="fub-key" type="password" autocomplete="off" placeholder="${st.connected ? 'Saved. Paste a new key to replace it' : 'Paste your API key'}"></div>
+          <div class="sub" style="margin:-6px 0 12px">In Follow Up Boss: <strong>Admin → API → Create API Key</strong>. Use the <strong>account owner's</strong> login; only the owner can turn on lead alerts.</div>
+          <div class="field">Post new leads in
+            <select id="fub-chan">${chans.map((c) => `<option value="${c.id}" ${c.id === defaultChan ? 'selected' : ''}>#${esc(fullLabel(c))}</option>`).join('')}</select></div>
+          <details class="adv"${st.systemKeySet ? ' open' : ''}><summary>Advanced: system key (only if Follow Up Boss asks for one)</summary>
+            <div class="field" style="margin-top:8px"><input id="fub-sys" type="password" autocomplete="off" placeholder="${st.systemKeySet ? 'Saved' : 'X-System-Key from apps.followupboss.com/system-registration'}"></div></details>
+          <p class="error" id="fub-err"></p>
+          <div class="modal-actions" style="justify-content:flex-start;flex-wrap:wrap">
+            <button class="btn-gold" id="fub-connect">${st.connected ? 'Save & reconnect' : 'Connect'}</button>
+            ${st.connected ? '<button class="btn" id="fub-test">Post a test lead</button><button class="btn danger" id="fub-off">Disconnect</button>' : ''}
+          </div>
+        </div>
+        <div class="set-block">
+          <div class="set-title">Other apps (Zapier, Make, website forms)</div>
+          <div class="sub">Any app can post into Kaizen HQ with a key from <strong>AI & API</strong>:</div>
+          <div class="copy-row"><code>POST ${esc(location.origin)}/api/v1/messages</code></div>
+          <div class="sub">Header <code>Authorization: Bearer &lt;key&gt;</code> · Body <code>{"channel": "leads", "text": "New lead: …"}</code></div>
+        </div>`;
+      const err = (m) => { $('#fub-err').textContent = m || ''; };
+      body.onclick = (e) => {
+        if (e.target.id === 'fub-connect') {
+          const apiKey = $('#fub-key').value.trim();
+          if (!apiKey && !st.connected) return err('Paste your Follow Up Boss API key.');
+          e.target.disabled = true; e.target.textContent = 'Connecting…'; err('');
+          S.socket.emit('fub:connect', { apiKey: apiKey || null, systemKey: $('#fub-sys').value.trim() || undefined, channelId: $('#fub-chan').value, baseUrl: location.origin, keep: !apiKey }, (res) => {
+            if (res.error) { err(res.error); e.target.disabled = false; e.target.textContent = 'Connect'; return; }
+            toast(res.status.webhook ? 'Follow Up Boss connected' : 'Saved. See the note about lead alerts.');
+            renderIntegrations(body);
+          });
+        }
+        if (e.target.id === 'fub-test') {
+          e.target.disabled = true; e.target.textContent = 'Posting…';
+          S.socket.emit('fub:test', {}, (res) => { if (res.error) err(res.error); else toast('Test lead posted'); renderIntegrations(body); });
+        }
+        if (e.target.id === 'fub-off' && confirm('Disconnect Follow Up Boss? New leads will stop posting.')) {
+          S.socket.emit('fub:disconnect', {}, () => { toast('Disconnected'); renderIntegrations(body); });
+        }
+      };
+    });
   }
 
   function deviceStatus() {
@@ -625,7 +687,7 @@
       if (r.error) { body.innerHTML = `<p class="error">${esc(r.error)}</p>`; return; }
       const url = location.origin + '/mcp';
       body.innerHTML = `
-        <p class="sub" style="margin-top:0">Connect an AI assistant such as <strong>Grok</strong> through MCP. It can read channels, search, post, reply in threads and create sub-channels. It cannot see direct messages unless someone messages it directly.</p>
+        <p class="sub" style="margin-top:0">Keys created here are your <strong>Kaizen HQ API keys</strong>. Use them to connect an AI assistant such as <strong>Grok</strong> through MCP, or to let Zapier and other apps post with <code>POST /api/v1/messages</code>. It can read channels, search, post, reply in threads and create sub-channels. It cannot see direct messages unless someone messages it directly.</p>
         <div class="set-block"><div class="set-title">Connection URL</div><div class="copy-row"><code>${esc(url)}</code><button class="btn" data-copy="${esc(url)}">Copy</button></div></div>
         <div class="set-block"><div class="set-title">Connected assistants</div>
           ${r.bots.length ? r.bots.map((b) => `<div class="list-row"><div class="avatar bot">✦</div><div class="grow"><strong>${esc(b.name)}</strong><div class="sub">Key ${esc(b.keyHint || '')} · ${b.lastUsed ? 'last used ' + fmtDay(b.lastUsed) + ' ' + fmtTime(b.lastUsed) : 'not used yet'}</div></div><button class="btn danger" data-revoke="${b.id}">Remove</button></div>`).join('') : '<p class="muted">None yet.</p>'}
@@ -851,7 +913,7 @@
     modal('New message', `<input class="search-input" id="dm-filter" type="search" autocomplete="off" placeholder="Find a teammate"><div id="dm-people" style="margin-top:10px"></div>`);
     const draw = (q = '') => {
       $('#dm-people').innerHTML = people.filter((u) => u.name.toLowerCase().includes(q.toLowerCase())).map((u) =>
-        `<div class="list-row" data-user="${u.id}">${avatar(u)}<div class="grow"><strong>${esc(u.name)}</strong>${u.isBot ? ' <span class="tag">AI</span>' : ''}${u.id === S.me.id ? ' <span class="muted">(you · notes to self)</span>' : ''}<div class="sub">${esc(u.title || '')}</div></div><span class="dot${S.online.has(u.id) ? ' on' : ''}"></span></div>`).join('') || '<p class="muted">No one found. Invite your teammates to create an account.</p>';
+        `<div class="list-row" data-user="${u.id}">${avatar(u)}<div class="grow"><strong>${esc(u.name)}</strong>${u.isBot ? ` <span class="tag">${u.integration ? 'App' : 'AI'}</span>` : ''}${u.id === S.me.id ? ' <span class="muted">(you · notes to self)</span>' : ''}<div class="sub">${esc(u.title || '')}</div></div><span class="dot${S.online.has(u.id) ? ' on' : ''}"></span></div>`).join('') || '<p class="muted">No one found. Invite your teammates to create an account.</p>';
     };
     draw();
     $('#dm-filter').focus();

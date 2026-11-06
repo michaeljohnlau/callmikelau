@@ -31,6 +31,28 @@ Push notifications go out for **direct messages, @mentions, @here/@channel and t
 
 > Push needs the site on **HTTPS**, which every host listed below provides. The push keys are saved in `DATA_DIR/vapid.json`. Keep that folder on a persistent disk, or set `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY`, so phones stay subscribed between restarts.
 
+## Follow Up Boss: new leads post to #leads
+
+1. In Follow Up Boss, signed in as the **account owner**, go to **Admin → API → Create API Key**.
+2. In Kaizen HQ, signed in as an admin and **from your live https address**, go to **🔔 Settings → Integrations → Follow Up Boss**. Paste the key, pick the channel (default `#leads`) and press **Connect**.
+3. Press **Post a test lead** to see your most recent contact posted.
+
+Kaizen HQ registers a `peopleCreated` webhook with Follow Up Boss. Every new lead is then posted with name, phone, email, source, stage, price, address, tags and a link back to Follow Up Boss. The assigned agent is @mentioned, so they get a push notification. Retries never post a lead twice.
+
+If Follow Up Boss responds that a system key is required, register free at apps.followupboss.com/system-registration (system name `KaizenHQ`). Then paste the key under **Advanced: system key** and press Connect again.
+
+## API (Zapier, Make, website forms)
+
+Keys from **Settings → AI & API** also work as REST API keys:
+
+```bash
+curl -X POST https://<your-domain>/api/v1/messages \
+  -H "Authorization: Bearer <key>" -H "Content-Type: application/json" \
+  -d '{"channel": "leads", "text": "New valuation request: 8 Elm Ave"}'
+```
+
+`GET /api/v1/channels` lists the channels. A `channel` can be a name like `leads`, a sub-channel like `listings/24-juniper-crescent`, or an id.
+
 ## Connect Grok (or another AI assistant) over MCP
 
 Kaizen HQ includes an MCP server at `https://<your-domain>/mcp` (Streamable HTTP).
