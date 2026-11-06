@@ -218,7 +218,9 @@
     if (li) openChannel(li.dataset.id);
   });
   $('#dm-list').addEventListener('click', (e) => { const li = e.target.closest('[data-id]'); if (li) openChannel(li.dataset.id); else if (e.target.closest('#dm-empty')) newDM(); });
-  $('#menu-btn').addEventListener('click', () => $('#sidebar').classList.toggle('open'));
+  $('#menu-btn').addEventListener('click', (e) => { e.stopPropagation(); $('#sidebar').classList.toggle('open'); });
+  // Phones: tapping anywhere outside the open sidebar closes it.
+  document.querySelector('.main').addEventListener('click', () => $('#sidebar').classList.remove('open'), true);
 
   // ---------- Channel ----------
   function openChannel(id) {
@@ -273,10 +275,10 @@
   $('#chan-topic').addEventListener('click', () => {
     const c = S.channels[S.current];
     if (!c || c.isDM) return;
-    modal('Edit topic', `<div class="field"><input id="topic-input" value="${esc(c.topic || '')}" maxlength="200" placeholder="What is this channel for?"></div><div class="modal-actions"><button class="btn" data-close>Cancel</button><button class="btn-gold" id="topic-save">Save</button></div>`);
+    modal('Edit topic', `<div class="field"><input id="topic-input" type="text" autocomplete="off" value="${esc(c.topic || '')}" maxlength="200" placeholder="What is this channel for?"></div><div class="modal-actions"><button class="btn" data-close>Cancel</button><button class="btn-gold" id="topic-save">Save</button></div>`);
     const inp = $('#topic-input'); inp.focus();
     const go = () => { S.socket.emit('channel:topic', { channelId: c.id, topic: inp.value }); closeModal(); };
-    $('#topic-save').onclick = go; inp.onkeydown = (e) => e.key === 'Enter' && go();
+    $('#topic-save').onclick = go; inp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } };
   });
   $('#members-btn').addEventListener('click', () => {
     const c = S.channels[S.current];
@@ -626,7 +628,7 @@
           ${r.bots.length ? r.bots.map((b) => `<div class="list-row"><div class="avatar bot">✦</div><div class="grow"><strong>${esc(b.name)}</strong><div class="sub">Key ${esc(b.keyHint || '')} · ${b.lastUsed ? 'last used ' + fmtDay(b.lastUsed) + ' ' + fmtTime(b.lastUsed) : 'not used yet'}</div></div><button class="btn danger" data-revoke="${b.id}">Remove</button></div>`).join('') : '<p class="muted">None yet.</p>'}
         </div>
         <div class="set-block"><div class="set-title">Add an assistant</div>
-          <div class="copy-row"><input id="bot-name" value="Grok" maxlength="40"><button class="btn-gold" id="bot-create">Create key</button></div>
+          <div class="copy-row"><input id="bot-name" type="text" autocomplete="off" value="Grok" maxlength="40"><button class="btn-gold" id="bot-create">Create key</button></div>
           <div id="bot-new"></div>
         </div>`;
       body.onclick = (e) => {
@@ -783,6 +785,7 @@
 
   // ---------- Modals ----------
   function modal(title, html) {
+    $('#sidebar').classList.remove('open');
     $('#modal-title').textContent = title;
     $('#modal-body').innerHTML = html;
     $('#modal-body').onclick = null;
@@ -804,8 +807,8 @@
       <div class="field">Put it under
         <select id="new-parent"><option value="">Nothing (a main channel)</option>${parents.map((c) => `<option value="${c.id}" ${c.id === parentId ? 'selected' : ''}># ${esc(c.name)}</option>`).join('')}</select>
       </div>
-      <div class="field"><span id="name-label">${parentId ? 'Address or name' : 'Channel name'}</span><input id="new-chan" placeholder="${parentId ? 'e.g. 24 Juniper Crescent' : 'e.g. open-houses'}" maxlength="80"></div>
-      <div class="field"><input id="new-topic" placeholder="What's it for? (optional)" maxlength="200"></div>
+      <div class="field"><span id="name-label">${parentId ? 'Address or name' : 'Channel name'}</span><input id="new-chan" type="text" autocomplete="off" autocorrect="off" autocapitalize="words" enterkeyhint="done" data-1p-ignore placeholder="${parentId ? 'e.g. 24 Juniper Crescent' : 'e.g. open-houses'}" maxlength="80"></div>
+      <div class="field"><input id="new-topic" type="text" autocomplete="off" enterkeyhint="done" placeholder="What's it for? (optional)" maxlength="200"></div>
       <p class="sub" id="sub-hint" style="${parentId ? '' : 'display:none'}">Everyone in the main channel is added automatically. Archive it when the deal closes.</p>
       <p class="error" id="chan-err"></p>
       <div class="modal-actions"><button class="btn-gold" id="create-chan">Create</button></div>
@@ -824,7 +827,7 @@
       setTimeout(() => openChannel(r.id), 50);
     });
     $('#create-chan').onclick = create;
-    $('#new-chan').onkeydown = (e) => e.key === 'Enter' && create();
+    $('#new-chan').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); create(); } };
     $('#modal-body').onclick = (e) => {
       const row = e.target.closest('[data-join], [data-arch]');
       if (!row) return;
@@ -840,7 +843,7 @@
   }
   function newDM() {
     const people = Object.values(S.users).sort((a, b) => a.name.localeCompare(b.name));
-    modal('New message', `<input class="search-input" id="dm-filter" placeholder="Find a teammate"><div id="dm-people" style="margin-top:10px"></div>`);
+    modal('New message', `<input class="search-input" id="dm-filter" type="search" autocomplete="off" placeholder="Find a teammate"><div id="dm-people" style="margin-top:10px"></div>`);
     const draw = (q = '') => {
       $('#dm-people').innerHTML = people.filter((u) => u.name.toLowerCase().includes(q.toLowerCase())).map((u) =>
         `<div class="list-row" data-user="${u.id}">${avatar(u)}<div class="grow"><strong>${esc(u.name)}</strong>${u.isBot ? ' <span class="tag">AI</span>' : ''}${u.id === S.me.id ? ' <span class="muted">(you · notes to self)</span>' : ''}<div class="sub">${esc(u.title || '')}</div></div><span class="dot${S.online.has(u.id) ? ' on' : ''}"></span></div>`).join('') || '<p class="muted">No one found. Invite your teammates to create an account.</p>';
@@ -879,7 +882,7 @@
     tryFlash();
   }
   function openSearch() {
-    modal('Search', `<input class="search-input" id="search-q" placeholder="Search messages, e.g. offer, 24 Juniper, showing"><div id="search-res" style="margin-top:10px"></div>`);
+    modal('Search', `<input class="search-input" id="search-q" type="search" autocomplete="off" enterkeyhint="search" placeholder="Search messages, e.g. offer, 24 Juniper, showing"><div id="search-res" style="margin-top:10px"></div>`);
     const q = $('#search-q');
     q.focus();
     let t;
@@ -980,15 +983,10 @@
     } catch (err) { console.warn('Push setup failed', err); }
   }
 
-  // Feel like an app, not a web page: block pinch-zoom and double-tap zoom.
-  ['gesturestart', 'gesturechange', 'gestureend'].forEach((ev) => document.addEventListener(ev, (e) => e.preventDefault(), { passive: false }));
-  document.addEventListener('touchmove', (e) => { if (e.touches.length > 1 || (e.scale && e.scale !== 1)) e.preventDefault(); }, { passive: false });
-  let lastTouchEnd = 0;
-  document.addEventListener('touchend', (e) => {
-    const now = Date.now();
-    if (now - lastTouchEnd < 300 && !e.target.closest('textarea, input')) e.preventDefault();
-    lastTouchEnd = now;
-  }, { passive: false });
+  // Feel like an app, not a web page: block pinch-zoom. (Double-tap zoom is turned off in CSS with
+  // touch-action, which never interferes with typing the way blocking touch events can on iPhone.)
+  ['gesturestart', 'gesturechange'].forEach((ev) => document.addEventListener(ev, (e) => { if (!e.target.closest?.('input, textarea, select')) e.preventDefault(); }, { passive: false }));
+  document.addEventListener('touchmove', (e) => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
 
   initAuth();
 })();

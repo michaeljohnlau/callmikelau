@@ -41,6 +41,8 @@ body { overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
 .app { position: fixed; inset: 0; overflow: hidden; }
 .auth { height: 100%; overflow-y: auto; }
 .sidebar, .chan-header, .panel-header, .composer-tools, button, .tabs, .side-title { -webkit-user-select: none; user-select: none; }
+/* Text fields must always accept typing and selection (iPhone blocks typing if this is inherited as none) */
+input, textarea, select, [contenteditable] { -webkit-user-select: text; user-select: text; touch-action: auto; }
 .messages, .panel-body, .side-scroll, #modal-body { overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
 body { font-family: var(--font); font-size: 15px; color: var(--text); background: var(--bg); -webkit-font-smoothing: antialiased; }
 button { font: inherit; cursor: pointer; }
