@@ -70,6 +70,7 @@
     socket.on('init', (d) => {
       S.me = d.me;
       S.prefs = d.prefs || S.prefs;
+      S.dash = d.dashboard || null;
       S.users = Object.fromEntries(d.users.map((u) => [u.id, u]));
       S.online = new Set(d.online);
       S.channels = Object.fromEntries(d.channels.map((c) => [c.id, c]));
@@ -79,6 +80,7 @@
       $('#app').classList.remove('hidden');
       renderMe();
       renderSidebar();
+      renderDashboard();
       const fromLink = new URLSearchParams(location.search).get('c');
       if (fromLink) history.replaceState(null, '', '/');
       const last = store.get('kaizenhq_last');
@@ -103,6 +105,7 @@
       if (channelId === S.current) { renderHeader(); updateComposer(); }
     });
     socket.on('user:update', (u) => { S.users[u.id] = u; if (u.id === S.me.id) { S.me = u; renderMe(); } renderSidebar(); renderMessages(); renderThread(); });
+    socket.on('dashboard', (d) => { S.dash = d; renderDashboard(); });
     socket.on('message:new', onNewMessage);
     socket.on('message:update', onUpdateMessage);
     socket.on('typing', onTyping);
@@ -358,6 +361,7 @@
         <button data-act="react" title="Add reaction">😊</button>
         ${!inThread ? '<button data-act="thread" title="Reply in thread">💬</button>' : ''}
         <button data-act="pin" title="${m.pinned ? 'Unpin' : 'Pin'}">📌</button>
+        ${m.lead ? `<button data-act="hot" title="${m.hot ? 'Not hot anymore' : 'Mark as a hot lead'}">${m.hot ? '🧊' : '🔥'}</button>` : ''}
         ${mine ? '<button data-act="edit" title="Edit">✏️</button>' : ''}
         ${mine || S.me.isAdmin ? '<button data-act="delete" title="Delete">🗑️</button>' : ''}
       </div>`;
@@ -365,7 +369,7 @@
     return `<div class="msg${cont ? ' cont' : ''}${!m.deleted && mentionsMe(m) && m.userId !== S.me.id ? ' mentioned' : ''}" data-mid="${m.id}">
       <div class="msg-gutter">${avatar(u, 'lg')}<div class="time-hover">${fmtTime(m.ts).replace(/\s?[AP]M/i, '')}</div></div>
       <div class="msg-body">
-        ${m.pinned && !m.deleted ? '<div class="pin-flag">📌 Pinned</div>' : ''}
+        ${(m.pinned || m.hot) && !m.deleted ? `<div class="pin-flag">${m.pinned ? '📌 Pinned' : ''}${m.pinned && m.hot ? ' · ' : ''}${m.hot ? '<span class="hot-flag">🔥 Hot lead</span>' : ''}</div>` : ''}
         <div class="msg-head"><span class="msg-author" data-user="${m.userId}">${esc(u?.name || 'Unknown')}</span>${u?.isBot ? `<span class="tag">${u.integration ? 'App' : 'AI'}</span>` : ''}${u?.title ? `<span class="msg-role">${esc(u.title)}</span>` : ''}<span class="msg-time" title="${new Date(m.ts).toLocaleString()}">${fmtTime(m.ts)}</span></div>
         ${body}
         ${m.tasks && !m.deleted ? tasksHTML(m) : ''}
@@ -416,6 +420,7 @@
     if (act === 'react') emojiPicker(a, (emoji) => S.socket.emit('reaction', { messageId: id, emoji }));
     if (act === 'thread') openThread(id);
     if (act === 'pin') S.socket.emit('message:pin', { messageId: id });
+    if (act === 'hot') { const mm = findMsg(id); S.socket.emit('lead:hot', { messageId: id, hot: !mm?.hot }, (r) => r?.error ? toast(r.error) : toast(mm?.hot ? 'Removed from hot leads' : '🔥 Added to hot leads')); }
     if (act === 'delete' && confirm('Delete this message? This cannot be undone.')) S.socket.emit('message:delete', { messageId: id });
     if (act === 'edit') startEdit(el, findMsg(id));
   }
@@ -964,6 +969,159 @@
 
   $('#me-bar').addEventListener('click', () => openSettings('profile'));
   $('#settings-open').addEventListener('click', () => openSettings('notifications'));
+
+  // ---------- Dashboard: forecast, goals, urgent, hot leads ----------
+  const money = (n) => {
+    n = Number(n) || 0;
+    if (n >= 1e6) return '$' + (n / 1e6).toFixed(n >= 1e7 ? 1 : 2).replace(/\.?0+$/, '') + 'M';
+    if (n >= 1e3) return '$' + Math.round(n / 1e3) + 'K';
+    return '$' + n;
+  };
+  const pct = (a, b) => (b > 0 ? Math.round((a / b) * 100) : 0);
+  const bar = (p) => `<div class="dash-bar"><span style="width:${Math.min(100, p)}%"></span></div>`;
+  let dashCollapsed = store.get('kaizenhq_dash') === 'collapsed';
+
+  function renderDashboard() {
+    const d = S.dash;
+    if (!d || !S.me) return;
+    $('#dash').classList.toggle('collapsed', dashCollapsed);
+    $('#dash-toggle').textContent = dashCollapsed ? '▸' : '▾';
+    const t = d.team;
+    const teamPct = pct(t.forecastGci, t.goalGci);
+    $('#dash-forecast').innerHTML = `
+      <div class="dash-label">📈 ${d.year} Forecast</div>
+      <div class="dash-value">${money(t.forecastGci)}<small> GCI</small></div>
+      <div class="dash-sub">${t.goalGci ? `${teamPct}% of ${money(t.goalGci)} goal` : 'Set goals to track progress'} · ${t.forecastDeals} deal${t.forecastDeals === 1 ? '' : 's'}</div>
+      ${bar(teamPct)}`;
+    const mine = d.agents.find((a) => a.userId === S.me.id) || { goalGci: 0, forecastGci: 0, goalDeals: 0, forecastDeals: 0 };
+    const myPct = pct(mine.forecastGci, mine.goalGci);
+    $('#dash-goal').innerHTML = mine.goalGci || mine.goalDeals ? `
+      <div class="dash-label">🎯 Your ${d.year} goal <span class="dash-edit">Edit</span></div>
+      <div class="dash-value">${money(mine.goalGci)}<small> · ${mine.goalDeals} deals</small></div>
+      <div class="dash-sub">${myPct}% forecast · ${money(mine.forecastGci)} · ${mine.forecastDeals} deal${mine.forecastDeals === 1 ? '' : 's'}</div>
+      ${bar(myPct)}` : `
+      <div class="dash-label">🎯 Your ${d.year} goal</div>
+      <div class="dash-value small">Set your goal</div>
+      <div class="dash-sub">Tap to add your GCI and deal targets</div>`;
+    const u = d.urgent;
+    $('#dash-urgent').classList.toggle('calm', !u.length);
+    $('#dash-urgent').innerHTML = `
+      <div class="dash-label">⚠️ Urgent</div>
+      <div class="dash-value">${u.length}<small> item${u.length === 1 ? '' : 's'}</small></div>
+      <div class="dash-sub">${u.length ? esc(u[0].label) : 'All clear. Nice work.'}</div>`;
+    renderTicker(d.hot);
+  }
+
+  function renderTicker(hot) {
+    const track = $('#ticker-track');
+    const sig = JSON.stringify(hot.map((h) => [h.name, h.detail, h.url]));
+    if (track.dataset.sig === sig) return; // don't restart the scroll if nothing changed
+    track.dataset.sig = sig;
+    if (!hot.length) {
+      track.classList.add('static');
+      track.innerHTML = '<span class="tick muted-tick">No hot leads right now. Tag a lead <b>Hot</b> in Follow Up Boss, or tap 🔥 on a lead in #leads.</span>';
+      return;
+    }
+    const item = (h) => h.url
+      ? `<a class="tick" href="${esc(h.url)}" target="_blank" rel="noopener noreferrer"><b>${esc(h.name)}</b>${h.detail ? `<span>${esc(h.detail)}</span>` : ''}<i>↗</i></a>`
+      : `<button class="tick" data-msg="${h.messageId}" data-chan="${h.channelId}"><b>${esc(h.name)}</b>${h.detail ? `<span>${esc(h.detail)}</span>` : ''}</button>`;
+    const once = hot.map(item).join('<span class="tick-sep">•</span>');
+    track.classList.remove('static');
+    track.innerHTML = `<div class="tick-run">${once}<span class="tick-sep">•</span></div><div class="tick-run" aria-hidden="true">${once}<span class="tick-sep">•</span></div>`;
+    track.style.setProperty('--ticker-duration', Math.max(18, hot.length * 7) + 's');
+  }
+  $('#ticker-track').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-msg]');
+    if (b) jumpTo(b.dataset.chan, b.dataset.msg);
+  });
+  // Pause the scroll while a finger is on it, so a lead can be tapped.
+  $('#ticker-viewport').addEventListener('touchstart', () => $('#ticker-track').classList.add('paused'), { passive: true });
+  $('#ticker-viewport').addEventListener('touchend', () => setTimeout(() => $('#ticker-track').classList.remove('paused'), 2500), { passive: true });
+  $('#dash-toggle').addEventListener('click', () => {
+    dashCollapsed = !dashCollapsed;
+    store.set('kaizenhq_dash', dashCollapsed ? 'collapsed' : 'open');
+    renderDashboard();
+  });
+
+  function forecastModal() {
+    const d = S.dash;
+    const t = d.team;
+    const rows = [...d.agents].sort((a, b) => b.forecastGci - a.forecastGci).map((a) => {
+      const p = pct(a.forecastGci, a.goalGci);
+      const canEdit = a.userId === S.me.id || S.me.isAdmin;
+      return `<div class="agent-row">
+        <div class="agent-top"><strong>${esc(a.name)}${a.userId === S.me.id ? ' <span class="muted">(you)</span>' : ''}</strong>
+          ${canEdit ? `<button class="btn small-btn" data-edit="${a.userId}">Edit</button>` : ''}</div>
+        <div class="agent-nums"><span>Goal <b>${money(a.goalGci)}</b> · ${a.goalDeals} deals</span><span>Closed <b>${money(a.closedGci)}</b> · ${a.closedDeals}</span><span>Pending <b>${money(a.pendingGci)}</b> · ${a.pendingDeals}</span></div>
+        <div class="agent-bar">${bar(p)}<span>${a.goalGci ? p + '%' : '·'}</span></div>
+      </div>`;
+    }).join('');
+    modal(`${d.year} Team Forecast`, `
+      <div class="fc-grid">
+        <div><div class="dash-label">Closed</div><div class="fc-num">${money(t.closedGci)}</div><div class="sub">${t.closedDeals} deals</div></div>
+        <div><div class="dash-label">Pending</div><div class="fc-num">${money(t.pendingGci)}</div><div class="sub">${t.pendingDeals} deals</div></div>
+        <div><div class="dash-label">Forecast</div><div class="fc-num gold">${money(t.forecastGci)}</div><div class="sub">${t.forecastDeals} deals</div></div>
+        <div><div class="dash-label">Goal</div><div class="fc-num">${money(t.goalGci)}</div><div class="sub">${t.goalDeals} deals</div></div>
+      </div>
+      ${bar(pct(t.forecastGci, t.goalGci))}
+      <p class="sub">Forecast = closed + pending (firm or conditional) GCI. Each agent keeps their own numbers up to date.</p>
+      <h4 class="modal-sub">Agents</h4>${rows || '<p class="muted">No agents yet.</p>'}`);
+    $('#modal-body').onclick = (e) => { const b = e.target.closest('[data-edit]'); if (b) goalModal(b.dataset.edit); };
+  }
+
+  function goalModal(userId = S.me.id) {
+    const a = S.dash.agents.find((x) => x.userId === userId) || {};
+    const own = userId === S.me.id;
+    const f = (key, label, prefix) => `<div class="field">${label}<div class="money-input">${prefix ? `<span>${prefix}</span>` : ''}<input data-g="${key}" inputmode="numeric" autocomplete="off" value="${a[key] ? Number(a[key]).toLocaleString('en-CA') : ''}" placeholder="0"></div></div>`;
+    modal(own ? `Your ${S.dash.year} goal` : `${S.users[userId]?.name || 'Agent'}: ${S.dash.year} goal`, `
+      <div class="goal-grid">
+        ${f('goalGci', '🎯 Goal: GCI', '$')}${f('goalDeals', '🎯 Goal: deals')}
+        ${f('closedGci', '✅ Closed so far: GCI', '$')}${f('closedDeals', '✅ Closed so far: deals')}
+        ${f('pendingGci', '⏳ Pending: GCI', '$')}${f('pendingDeals', '⏳ Pending: deals')}
+      </div>
+      <p class="sub">Pending = firm or conditional deals that haven't closed yet. Your forecast is closed + pending.</p>
+      <p class="error" id="goal-err"></p>
+      <div class="modal-actions"><button class="btn" id="goal-back">Team forecast</button><button class="btn-gold" id="goal-save">Save</button></div>`);
+    $('#modal-body').querySelectorAll('[data-g]').forEach((inp) => inp.addEventListener('input', () => {
+      const digits = inp.value.replace(/[^\d]/g, '');
+      inp.value = digits ? Number(digits).toLocaleString('en-CA') : '';
+    }));
+    $('#goal-back').onclick = forecastModal;
+    $('#goal-save').onclick = () => {
+      const values = {};
+      $('#modal-body').querySelectorAll('[data-g]').forEach((inp) => { values[inp.dataset.g] = inp.value.replace(/[^\d]/g, '') || 0; });
+      S.socket.emit('goal:update', { userId, values }, (r) => {
+        if (r.error) return ($('#goal-err').textContent = r.error);
+        closeModal(); toast('Goal saved');
+      });
+    };
+  }
+
+  function urgentModal() {
+    const list = S.dash.urgent;
+    const ago = (ts) => { const m = Math.round((Date.now() - ts) / 60000); return m < 60 ? `${m}m` : m < 1440 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`; };
+    modal('Urgent', `
+      ${list.length ? list.map((u) => `<div class="urgent-row" ${u.kind === 'task' ? `data-jump="${u.messageId}" data-chan="${u.channelId}"` : ''}>
+        <div class="grow"><div><strong>${esc(u.label)}</strong></div>
+          <div class="sub">${u.lead ? esc(u.lead) + ' · ' : ''}${esc(u.status)} · ${ago(u.since)} ago</div></div>
+        ${u.kind === 'task' ? '<span class="go">Open ›</span>' : `${u.link ? `<a class="btn" href="${esc(u.link)}" target="_blank" rel="noopener noreferrer">Open</a>` : ''}<button class="btn" data-done="${u.id}">Done</button>`}
+      </div>`).join('') : '<p class="muted">Nothing urgent. 🎉</p>'}
+      <h4 class="modal-sub">Add an urgent item</h4>
+      <div class="field"><input id="urg-text" type="text" autocomplete="off" maxlength="140" placeholder="e.g. Offer deadline for 24 Juniper at 5pm"></div>
+      <div class="field"><input id="urg-link" type="url" autocomplete="off" placeholder="Link (optional), e.g. a Follow Up Boss or document link"></div>
+      <div class="modal-actions"><button class="btn-gold" id="urg-add">Add</button></div>`);
+    $('#urg-add').onclick = () => S.socket.emit('urgent:add', { text: $('#urg-text').value, link: $('#urg-link').value }, (r) => { if (r.error) toast(r.error); else { toast('Added to urgent'); setTimeout(urgentModal, 300); } });
+    $('#urg-text').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); $('#urg-add').click(); } };
+    $('#modal-body').onclick = (e) => {
+      const d = e.target.closest('[data-done]');
+      if (d) return S.socket.emit('urgent:done', { id: d.dataset.done }, () => setTimeout(urgentModal, 300));
+      const j = e.target.closest('[data-jump]');
+      if (j && !e.target.closest('a, button')) { closeModal(); jumpTo(j.dataset.chan, j.dataset.jump); }
+    };
+  }
+  $('#dash-forecast').addEventListener('click', forecastModal);
+  $('#dash-goal').addEventListener('click', () => goalModal());
+  $('#dash-urgent').addEventListener('click', urgentModal);
 
   // ---------- Search ----------
   function resultRow(m) {

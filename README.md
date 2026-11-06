@@ -6,6 +6,11 @@ Private, real-time team chat for **Kaizen Real Estate Team**. It gives the team 
 
 - **Channels:** `#general`, `#wins`, `#listings`, `#leads` and `#marketing` come built in. Anyone can create, browse, join or leave channels and edit a channel's topic.
 - **Sub-channels:** one per listing address, e.g. `#listings › 24 Juniper Crescent`. Everyone in the main channel is added automatically. Archive a sub-channel when the deal closes; its messages stay searchable.
+- **Team dashboard:** a bar across the top (collapsible) shows:
+  - **📈 Forecast:** the team's closed + pending GCI and deals for the year vs. the combined goal. Tap it for each agent's numbers.
+  - **🎯 Your goal:** each agent sets and edits their own goal, closed and pending numbers. Admins can edit anyone's.
+  - **⚠️ Urgent:** lead steps nobody has claimed, steps claimed over 24h ago and still open, and items anyone can add (e.g. "Offer deadline 5pm").
+  - **🔥 Hot leads:** a scrolling ticker. Each name opens the lead in Follow Up Boss. It pulls leads whose Follow Up Boss stage or tag says "Hot" (refreshed every 5 minutes), plus any lead a teammate marks 🔥 in the app.
 - **Notification controls:** set each channel to *All messages*, *Mentions only* or *Muted* (sub-channels follow their main channel unless changed). Choose from 6 sounds and pause notifications for 30 min, 1 hour, 2 hours or until tomorrow at 8am. Find these under the 🔔 in the sidebar or the channel header.
 - **AI assistants (MCP):** connect Grok or any MCP-capable assistant. See below.
 - **Direct messages:** one-on-one chats, plus "notes to self."
@@ -76,7 +81,7 @@ Kaizen HQ includes an MCP server at `https://<your-domain>/mcp` (Streamable HTTP
 3. Create **one key per bot** (e.g. "Grok CMA", "Grok Marketing"). Each bot posts under its own name, shows when it was last used, and can be removed on its own.
 4. The assistant appears in the team list with an **AI** tag. Remove it any time from the same screen and its key stops working immediately.
 
-**Tools it gets:** `list_open_tasks` and `update_task` (find and claim or complete first steps, e.g. a CMA), `list_channels`, `read_messages`, `read_thread`, `search_messages`, `get_my_mentions` (who @mentioned it and whether it has answered yet), `send_message` (including thread replies), `create_channel` (including listing sub-channels) and `list_team`.
+**Tools it gets:** `get_dashboard` (forecast, goals, urgent items, hot leads), `list_open_tasks` and `update_task` (find and claim or complete first steps, e.g. a CMA), `list_channels`, `read_messages`, `read_thread`, `search_messages`, `get_my_mentions` (who @mentioned it and whether it has answered yet), `send_message` (including thread replies), `create_channel` (including listing sub-channels) and `list_team`.
 
 **What it can see:** all public channels and sub-channels. It cannot see direct messages between teammates, only DMs sent to the assistant itself.
 

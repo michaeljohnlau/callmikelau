@@ -120,7 +120,10 @@ function mountIntegrations(app, core) {
     const pb = playbooks()[type];
     const fill = (t) => t.replace(/\{name\}/g, name).replace(/\{first\}/g, first)
       .replace(/\{address\}/g, address || '(address to confirm)');
-    return { type, text: lines.join('\n'), tasks: (pb.steps || []).map(fill).filter(Boolean), pin: !!pb.pin };
+    return {
+      type, text: lines.join('\n'), tasks: (pb.steps || []).map(fill).filter(Boolean), pin: !!pb.pin,
+      lead: { personId: p.id, name, url: p.id ? `https://app.followupboss.com/2/people/view/${p.id}` : '', type, address: address || propertyAddr || '' },
+    };
   }
 
   // Backwards-compatible helper used by tests.
@@ -135,7 +138,7 @@ function mountIntegrations(app, core) {
     // The inquiry (type, message, property address) lives in the person's events.
     const events = await fub(`/events?personId=${personId}&limit=5&sort=-created`).then((r) => r?.events || []).catch(() => []);
     const lead = buildLead(p, events, { test });
-    core.postMessage(fubBot(), c.channelId, lead.text, null, { tasks: lead.tasks, pin: lead.pin, leadType: lead.type });
+    core.postMessage(fubBot(), c.channelId, lead.text, null, { tasks: lead.tasks, pin: lead.pin, leadType: lead.type, lead: lead.lead });
     if (!test) {
       c.posted.push(personId);
       if (c.posted.length > 2000) c.posted = c.posted.slice(-1000);
@@ -228,6 +231,35 @@ function mountIntegrations(app, core) {
     return { ok: true };
   }
 
+  // ----- Hot leads: anyone in Follow Up Boss whose stage or tags say "Hot" -----
+  let hotCache = [];
+  let hotTimer = null;
+  async function refreshHot() {
+    const c = cfg();
+    if (!c?.apiKey) { hotCache = []; return; }
+    const fields = 'id,name,firstName,lastName,stage,tags,source,addresses,assignedTo';
+    const data = await fub(`/people?sort=-updated&limit=100&fields=${fields}`)
+      .catch(() => fub(`/people?limit=100&fields=${fields}`));
+    const people = data?.people || [];
+    hotCache = people
+      .filter((p) => /hot/i.test(p.stage || '') || (p.tags || []).some((t) => /^hot\b|\bhot$/i.test(String(t).trim())))
+      .map((p) => {
+        const name = clean(p.name || [p.firstName, p.lastName].filter(Boolean).join(' '));
+        const addr = addressOf((p.addresses || [])[0]);
+        return { personId: p.id, name, detail: [clean(p.stage), addr, p.assignedTo && `→ ${clean(p.assignedTo).split(' ')[0]}`].filter(Boolean).join(' · '), url: `https://app.followupboss.com/2/people/view/${p.id}`, source: 'fub' };
+      });
+    c.hotRefreshedAt = Date.now();
+    core.dashboardChanged();
+  }
+  function scheduleHot() {
+    clearInterval(hotTimer);
+    if (!cfg()?.apiKey) { hotCache = []; return; }
+    refreshHot().catch((e) => console.error('Hot lead refresh failed:', e.message));
+    hotTimer = setInterval(() => refreshHot().catch((e) => console.error('Hot lead refresh failed:', e.message)), 5 * 60 * 1000);
+    hotTimer.unref?.();
+  }
+  setTimeout(scheduleHot, 2000).unref?.();
+
   function savePlaybooks(input) {
     const c = cfg();
     if (!c) throw new Error('Connect Follow Up Boss first.');
@@ -242,7 +274,13 @@ function mountIntegrations(app, core) {
     return status();
   }
 
-  return { status, connect, disconnect, test, savePlaybooks, _formatLead: formatLead, _buildLead: buildLead };
+  return {
+    status, test, savePlaybooks, _formatLead: formatLead, _buildLead: buildLead,
+    connect: async (d) => { const r = await connect(d); scheduleHot(); return r; },
+    disconnect: async () => { const r = await disconnect(); scheduleHot(); core.dashboardChanged(); return r; },
+    hotLeads: () => hotCache,
+    refreshHot,
+  };
 }
 
 module.exports = { mountIntegrations };

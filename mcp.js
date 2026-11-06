@@ -225,6 +225,20 @@ function mountMcp(app, core) {
       }
     });
 
+    server.registerTool('get_dashboard', {
+      title: 'Get the team dashboard',
+      description: 'The team forecast vs goal for the year (GCI and deals, per agent), urgent items, and hot leads with Follow Up Boss links.',
+      annotations: { readOnlyHint: true },
+    }, async () => {
+      const d = core.dashboard();
+      return text({
+        year: d.year, team: d.team,
+        agents: d.agents.map(({ userId, updatedAt, ...a }) => a),
+        urgent: d.urgent.map(({ id, messageId, channelId, ...u }) => ({ ...u, message_id: messageId, since: new Date(u.since).toISOString() })),
+        hot_leads: d.hot.map(({ name, detail, url }) => ({ name, detail, url })),
+      });
+    });
+
     server.registerTool('list_team', {
       title: 'List team members',
       description: 'List the people in the workspace with their roles.',

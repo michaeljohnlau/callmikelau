@@ -74,6 +74,18 @@
     </aside>
 
     <main class="main">
+      <section class="dash" id="dash" aria-label="Team dashboard">
+        <div class="dash-cards" id="dash-cards">
+          <button class="dash-card" id="dash-forecast"></button>
+          <button class="dash-card" id="dash-goal"></button>
+          <button class="dash-card urgent" id="dash-urgent"></button>
+        </div>
+        <div class="ticker">
+          <span class="ticker-label">🔥 Hot leads</span>
+          <div class="ticker-viewport" id="ticker-viewport"><div class="ticker-track" id="ticker-track"></div></div>
+          <button class="dash-toggle" id="dash-toggle" aria-label="Show or hide dashboard" title="Show or hide dashboard">▾</button>
+        </div>
+      </section>
       <header class="chan-header">
         <button class="icon-btn menu-btn" id="menu-btn" aria-label="Open sidebar">☰</button>
         <div class="chan-title-wrap">

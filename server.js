@@ -65,6 +65,8 @@ const storage = (() => {
 })();
 if (storage.warning) console.warn('WARNING: ' + storage.warning);
 db.botTokens = db.botTokens || {};
+db.goals = db.goals || {};   // { [year]: { [userId]: { goalGci, goalDeals, closedGci, closedDeals, pendingGci, pendingDeals } } }
+db.urgent = db.urgent || []; // custom urgent items added by the team
 
 // ---------- Push notifications (VAPID keys are generated once and saved) ----------
 const VAPID_FILE = path.join(DATA_DIR, 'vapid.json');
@@ -171,7 +173,7 @@ function messageView(m) {
     parentId: m.parentId || null, edited: !!m.edited, deleted: !!m.deleted,
     reactions: m.reactions || {}, replyCount: m.replyCount || 0, lastReplyTs: m.lastReplyTs || null,
     pinned: !!m.pinned, mentions: m.mentions || [],
-    tasks: m.tasks || null, leadType: m.leadType || null,
+    tasks: m.tasks || null, leadType: m.leadType || null, lead: m.lead || null, hot: !!m.hot,
   };
 }
 
@@ -261,6 +263,10 @@ function postMessage(user, channelId, text, parentId, opts = {}) {
   }
   if (opts.pin && !parentId) m.pinned = true;
   if (opts.leadType) m.leadType = String(opts.leadType).slice(0, 20);
+  if (opts.lead && typeof opts.lead === 'object') {
+    const l = opts.lead;
+    m.lead = { personId: l.personId || null, name: String(l.name || '').slice(0, 80), url: String(l.url || '').slice(0, 300), type: l.type || null, address: String(l.address || '').slice(0, 160) };
+  }
   db.messages.push(m);
   user.lastRead = user.lastRead || {};
   user.lastRead[c.id] = m.ts;
@@ -273,6 +279,7 @@ function postMessage(user, channelId, text, parentId, opts = {}) {
   save();
   emitToChannel(c, 'message:new', messageView(m));
   notifyRecipients(c, m, user);
+  if (m.tasks || m.lead) dashboardChanged();
   return m;
 }
 
@@ -309,7 +316,72 @@ function updateTask(user, messageId, taskId, action) {
   save();
   emitToChannel(c, 'message:update', messageView(m));
   if (note) postMessage(user, c.id, note, m.id);
+  dashboardChanged();
   return m;
+}
+
+// ---------- Dashboard: forecast, goals, urgent items, hot leads ----------
+const currentYear = () => Number(new Date().toLocaleString('en-CA', { timeZone: 'America/Toronto', year: 'numeric' }));
+const GOAL_FIELDS = ['goalGci', 'goalDeals', 'closedGci', 'closedDeals', 'pendingGci', 'pendingDeals'];
+let hotFromFub = () => []; // replaced by the Follow Up Boss integration
+
+function dashboard() {
+  const year = currentYear();
+  const g = db.goals[year] || {};
+  const people = Object.values(db.users).filter((u) => !u.isBot && !u.disabled);
+  const agents = people.map((u) => {
+    const r = g[u.id] || {};
+    const row = Object.fromEntries(GOAL_FIELDS.map((f) => [f, Number(r[f]) || 0]));
+    return { userId: u.id, name: u.name, ...row, forecastGci: row.closedGci + row.pendingGci, forecastDeals: row.closedDeals + row.pendingDeals, updatedAt: r.updatedAt || null };
+  });
+  const sum = (f) => agents.reduce((n, a) => n + a[f], 0);
+  const team = { goalGci: sum('goalGci'), goalDeals: sum('goalDeals'), closedGci: sum('closedGci'), closedDeals: sum('closedDeals'), pendingGci: sum('pendingGci'), pendingDeals: sum('pendingDeals') };
+  team.forecastGci = team.closedGci + team.pendingGci;
+  team.forecastDeals = team.closedDeals + team.pendingDeals;
+
+  // Urgent: lead steps nobody has claimed, and claimed steps still open after 24 hours.
+  const now = Date.now();
+  const since = now - 30 * 864e5;
+  const urgent = [];
+  for (const m of db.messages) {
+    if (!m.tasks || m.deleted || m.ts < since) continue;
+    const c = db.channels[m.channelId];
+    if (!c || c.archived) continue;
+    for (const t of m.tasks) {
+      if (t.doneBy) continue;
+      const overdue = t.claimedBy && now - (t.claimedAt || m.ts) > 864e5;
+      if (t.claimedBy && !overdue) continue;
+      urgent.push({
+        kind: 'task', id: t.id, messageId: m.id, channelId: m.channelId, label: t.label,
+        lead: m.lead?.name || '', since: t.claimedBy ? t.claimedAt : m.ts,
+        status: t.claimedBy ? `Overdue · ${db.users[t.claimedBy]?.name.split(' ')[0] || ''}` : 'Needs an owner',
+      });
+    }
+  }
+  for (const u of db.urgent) {
+    if (u.doneAt) continue;
+    urgent.push({ kind: 'custom', id: u.id, label: u.text, link: u.link || '', since: u.createdAt, status: `Added by ${db.users[u.createdBy]?.name.split(' ')[0] || 'team'}` });
+  }
+  urgent.sort((a, b) => (a.kind === 'custom' ? 0 : 1) - (b.kind === 'custom' ? 0 : 1) || a.since - b.since);
+
+  // Hot leads: "Hot" in Follow Up Boss (stage or tag), plus leads the team marked 🔥 in the app.
+  const hot = [];
+  const seen = new Set();
+  for (const h of hotFromFub()) { if (!seen.has(h.personId)) { seen.add(h.personId); hot.push(h); } }
+  for (const m of db.messages) {
+    if (!m.hot || m.deleted || !m.lead) continue;
+    const key = m.lead.personId || m.id;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    hot.push({ personId: m.lead.personId, name: m.lead.name, detail: [m.lead.type && m.lead.type[0].toUpperCase() + m.lead.type.slice(1), m.lead.address].filter(Boolean).join(' · '), url: m.lead.url, messageId: m.id, channelId: m.channelId, source: 'team' });
+  }
+  return { year, team, agents, urgent: urgent.slice(0, 30), hot: hot.slice(0, 40) };
+}
+
+let dashTimer = null;
+function dashboardChanged() {
+  if (dashTimer || !io) return;
+  dashTimer = setTimeout(() => { dashTimer = null; io.emit('dashboard', dashboard()); }, 250);
 }
 
 function createChannel(user, { name, topic, parentId }) {
@@ -377,6 +449,7 @@ app.post('/api/register', (req, res) => {
   db.sessions[token] = { userId: id, createdAt: Date.now() };
   save();
   io.emit('user:new', publicUser(db.users[id]));
+  dashboardChanged();
   for (const c of joined) emitToChannel(c, 'channel:members', { channelId: c.id, members: c.members });
   res.json({ token });
 });
@@ -411,13 +484,15 @@ mountMcp(app, {
     return bot;
   },
   canSee, displayName, messageView, postMessage, createChannel, channelSlug, updateTask,
+  dashboard: () => dashboard(),
 });
 
 const integrations = mountIntegrations(app, {
   get db() { return db; },
-  save, postMessage, publicUser,
+  save, postMessage, publicUser, dashboardChanged,
   io: () => io,
 });
+hotFromFub = () => integrations.hotLeads();
 
 const server = http.createServer(app);
 io = new Server(server);
@@ -454,6 +529,7 @@ io.on('connection', (socket) => {
     me: publicUser(user),
     storageWarning: user.isAdmin ? storage.warning : null,
     prefs: prefsOf(user),
+    dashboard: dashboard(),
     users: Object.values(db.users).filter((u) => !u.disabled).map(publicUser),
     online: [...online.keys()],
     channels: Object.values(db.channels).filter((c) => c.members.includes(user.id)).map((c) => channelView(c, user)),
@@ -497,6 +573,58 @@ io.on('connection', (socket) => {
     m.text = '';
     save();
     emitToChannel(db.channels[m.channelId], 'message:update', messageView(m));
+  });
+
+  // ----- Dashboard -----
+  socket.on('goal:update', ({ userId, values }, cb) => {
+    const target = userId || me().id;
+    if (target !== me().id && !me().isAdmin) return cb?.({ error: 'You can only edit your own goal.' });
+    if (!db.users[target] || db.users[target].isBot) return cb?.({ error: 'Not found' });
+    const year = currentYear();
+    db.goals[year] = db.goals[year] || {};
+    const row = db.goals[year][target] || {};
+    for (const f of GOAL_FIELDS) {
+      if (values?.[f] === undefined) continue;
+      const n = Math.round(Number(String(values[f]).replace(/[$,\s]/g, '')));
+      if (!Number.isFinite(n) || n < 0 || n > 1e10) return cb?.({ error: 'Please enter numbers only.' });
+      row[f] = n;
+    }
+    row.updatedAt = Date.now();
+    db.goals[year][target] = row;
+    save();
+    dashboardChanged();
+    cb?.({ ok: true });
+  });
+
+  socket.on('urgent:add', ({ text, link }, cb) => {
+    const t = String(text || '').trim().slice(0, 140);
+    if (!t) return cb?.({ error: 'Describe the urgent item.' });
+    const l = String(link || '').trim();
+    db.urgent.push({ id: uid(), text: t, link: /^https?:\/\//.test(l) ? l.slice(0, 300) : '', createdBy: me().id, createdAt: Date.now(), doneAt: null });
+    if (db.urgent.length > 300) db.urgent = db.urgent.filter((u) => !u.doneAt || Date.now() - u.doneAt < 30 * 864e5);
+    save();
+    dashboardChanged();
+    cb?.({ ok: true });
+  });
+
+  socket.on('urgent:done', ({ id }, cb) => {
+    const u = db.urgent.find((x) => x.id === id);
+    if (!u) return cb?.({ error: 'Not found' });
+    u.doneAt = Date.now();
+    u.doneBy = me().id;
+    save();
+    dashboardChanged();
+    cb?.({ ok: true });
+  });
+
+  socket.on('lead:hot', ({ messageId, hot }, cb) => {
+    const m = db.messages.find((x) => x.id === messageId);
+    if (!m || !m.lead || !canSee(me(), db.channels[m.channelId])) return cb?.({ error: 'Not found' });
+    m.hot = !!hot;
+    save();
+    emitToChannel(db.channels[m.channelId], 'message:update', messageView(m));
+    dashboardChanged();
+    cb?.({ ok: true });
   });
 
   socket.on('task:update', ({ messageId, taskId, action }, cb) => {
