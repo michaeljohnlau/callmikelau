@@ -6,6 +6,12 @@ Private, real-time team chat for **Kaizen Real Estate Team**. It gives the team 
 
 - **Channels:** `#general`, `#wins`, `#listings`, `#leads` and `#marketing` come built in. Anyone can create, browse, join or leave channels and edit a channel's topic.
 - **Sub-channels:** one per listing address, e.g. `#listings › 24 Juniper Crescent`. Everyone in the main channel is added automatically. Archive a sub-channel when the deal closes; its messages stay searchable.
+- **☀️ Today (home screen):** each person sees only their own work: tasks waiting for them to accept, tasks passed back to them, overdue, due today, blockers and decisions needed, unread @mentions, lead steps they claimed, and what's coming up this week.
+- **Tasks from messages:** hover a message and tap ☑ to turn it into a task with an owner and due date. The task links back to the conversation, the message shows the task's status, and a note is left in the thread.
+- **Handoffs:** giving a task to someone else (or Grok doing it) puts it in their Today to **Accept** or **Pass it back** with a reason. Until then the sender sees "waiting on …". Handoffs nobody has accepted for 24h show up as Urgent.
+- **Listing stages:** listing sub-channels have a stage bar: **Listing → Offer accepted → Firm sale → Closing**. Moving to a stage adds that stage's tasks with due dates. In a template, `| 2d` at the end of a line means "due 2 days after the stage starts". Admins can edit the templates.
+- **Links to the original records:** each channel can link its Follow Up Boss contact, Drive folder and listing page. The contact card shows live details from Follow Up Boss, so client details are never copied into Kaizen HQ.
+- **Daily summary & quiet hours:** each person gets one morning message from *Kaizen HQ* (default 7:30am) with what's overdue, due today, waiting for them, decisions needed and what the team finished yesterday. Quiet hours (default 9pm–7am) hold back phone notifications. Both are set under 🔔 Settings → Notifications.
 - **Team dashboard:** a bar across the top (collapsible) shows:
   - **📈 Forecast:** the team's closed + pending GCI and deals for the year vs. the combined goal. Tap it for each agent's numbers.
   - **🎯 Your goal:** each agent sets and edits their own goal, closed and pending numbers. Admins can edit anyone's.
@@ -88,7 +94,7 @@ Kaizen HQ includes an MCP server at `https://<your-domain>/mcp` (Streamable HTTP
 3. Create **one key per bot** (e.g. "Grok CMA", "Grok Marketing"). Each bot posts under its own name, shows when it was last used, and can be removed on its own.
 4. The assistant appears in the team list with an **AI** tag. Remove it any time from the same screen and its key stops working immediately.
 
-**Tools it gets:** `get_dashboard` (forecast, goals, urgent items, hot leads), `list_open_tasks` and `update_task` (find and claim or complete first steps, e.g. a CMA), `list_channels`, `read_messages`, `read_thread`, `search_messages`, `get_my_mentions` (who @mentioned it and whether it has answered yet), `send_message` (including thread replies), `create_channel` (including listing sub-channels) and `list_team`.
+**Tools it gets:** `create_task` (hand work to a person, who must accept it), `list_tasks`, `get_dashboard` (forecast, goals, urgent items, hot leads), `list_open_tasks` and `update_task` (find and claim or complete first steps, e.g. a CMA), `list_channels`, `read_messages`, `read_thread`, `search_messages`, `get_my_mentions` (who @mentioned it and whether it has answered yet), `send_message` (including thread replies), `create_channel` (including listing sub-channels) and `list_team`.
 
 **What it can see:** all public channels and sub-channels. It cannot see direct messages between teammates, only DMs sent to the assistant itself.
 

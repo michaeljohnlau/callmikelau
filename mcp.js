@@ -225,6 +225,62 @@ function mountMcp(app, core) {
       }
     });
 
+    const findPerson = (name) => {
+      if (!name) return null;
+      const n = String(name).toLowerCase().replace(/^@/, '').trim();
+      const people = Object.values(core.db.users).filter((u) => !u.isBot && !u.disabled);
+      return people.find((u) => u.name.toLowerCase() === n) || people.find((u) => u.name.toLowerCase().split(' ')[0] === n) || null;
+    };
+
+    server.registerTool('create_task', {
+      title: 'Create a task (and hand it to someone)',
+      description: 'Create a task in a channel, optionally from a chat message. If you assign it to a person, it is a handoff: it waits in their Today screen until they accept it, so nothing falls between people.',
+      inputSchema: {
+        channel: z.string().describe('Channel, e.g. "listings/24-juniper-crescent" or "leads"'),
+        task: z.string().min(1).max(200),
+        assignee: z.string().optional().describe('Team member name, e.g. "Neeraj"'),
+        due: z.string().optional().describe('Due date YYYY-MM-DD (5pm Toronto time), optionally with time "YYYY-MM-DD HH:MM"'),
+        note: z.string().max(300).optional().describe('Context for the person receiving it'),
+        source_message_id: z.string().optional().describe('Create it from this message so the discussion stays attached'),
+      },
+    }, async ({ channel, task, assignee, due, note, source_message_id }) => {
+      const c = resolveChannel(bot, channel);
+      if (!c) return error(`Channel "${channel}" not found.`);
+      const person = assignee ? findPerson(assignee) : null;
+      if (assignee && !person) return error(`No team member called "${assignee}". Use list_team.`);
+      try {
+        const it = core.tasks.createTask(bot, { channelId: c.id, label: task, assigneeId: person?.id || null, dueAt: due || null, note, sourceMessageId: source_message_id });
+        return text({ ok: true, item_id: it.id, channel: core.displayName(c), waiting_for_acceptance: !!(it.handoff && it.handoff.state === 'pending') });
+      } catch (e) { return error(e.message); }
+    });
+
+    server.registerTool('list_tasks', {
+      title: 'List open tasks',
+      description: 'List open tasks across the channels you can see, with owner, due date, handoff status (waiting for acceptance) and blockers.',
+      inputSchema: {
+        assignee: z.string().optional().describe('Only this person\'s tasks'),
+        overdue_only: z.boolean().optional(),
+        channel: z.string().optional(),
+      },
+      annotations: { readOnlyHint: true },
+    }, async ({ assignee, overdue_only, channel }) => {
+      const person = assignee ? findPerson(assignee) : null;
+      if (assignee && !person) return error(`No team member called "${assignee}".`);
+      const only = channel ? resolveChannel(bot, channel) : null;
+      const now = Date.now();
+      const rows = [];
+      for (const c of Object.values(core.db.channels)) {
+        if (c.archived || !c.checklist || !core.canSee(bot, c) || (only && only.id !== c.id)) continue;
+        for (const t of c.checklist) {
+          if (t.doneBy || (person && t.assigneeId !== person.id) || (overdue_only && !(t.dueAt && t.dueAt < now))) continue;
+          rows.push({ channel: core.displayName(c), item_id: t.id, task: t.label, owner: t.assigneeId ? nameOf(t.assigneeId) : null,
+            due: t.dueAt ? new Date(t.dueAt).toISOString() : null, overdue: !!(t.dueAt && t.dueAt < now),
+            handoff: t.handoff ? { from: nameOf(t.handoff.fromId), state: t.handoff.state } : undefined, blocked: t.blocked?.reason });
+        }
+      }
+      return text(rows.slice(0, 100));
+    });
+
     server.registerTool('get_checklist', {
       title: 'Get a channel checklist',
       description: 'Get the task checklist of a channel, e.g. the new-listing checklist of "listings/24-juniper-crescent", with what is done and by whom.',

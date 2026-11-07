@@ -264,6 +264,26 @@ function mountIntegrations(app, core) {
   }
   setTimeout(scheduleHot, 2000).unref?.();
 
+  // Live contact details for a channel's linked Follow Up Boss contact (cached briefly, never stored).
+  const personCache = new Map();
+  async function getPerson(id) {
+    if (!cfg()?.apiKey) return { notConnected: true };
+    const hit = personCache.get(id);
+    if (hit && Date.now() - hit.at < 5 * 60 * 1000) return hit.data;
+    const p = await fub(`/people/${id}?fields=allFields`);
+    const data = {
+      id: p.id, name: clean(p.name || [p.firstName, p.lastName].filter(Boolean).join(' ')),
+      stage: clean(p.stage), source: clean(p.source), assignedTo: clean(p.assignedTo),
+      phone: (p.phones || []).map((x) => x.value).filter(Boolean)[0] || '',
+      email: (p.emails || []).map((x) => x.value).filter(Boolean)[0] || '',
+      tags: (p.tags || []).slice(0, 8).map(clean),
+      lastActivity: p.lastActivity || p.updated || null,
+      url: `https://app.followupboss.com/2/people/view/${p.id}`,
+    };
+    personCache.set(id, { at: Date.now(), data });
+    return data;
+  }
+
   function savePlaybooks(input) {
     const c = cfg();
     if (!c) throw new Error('Connect Follow Up Boss first.');
@@ -283,6 +303,7 @@ function mountIntegrations(app, core) {
     connect: async (d) => { const r = await connect(d); scheduleHot(); return r; },
     disconnect: async () => { const r = await disconnect(); scheduleHot(); core.dashboardChanged(); return r; },
     hotLeads: () => hotCache,
+    getPerson,
     refreshHot,
   };
 }

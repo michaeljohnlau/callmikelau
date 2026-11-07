@@ -12,6 +12,7 @@
     socket: null, me: null, users: {}, online: new Set(), channels: {}, browse: {},
     current: null, messages: {}, hasMore: {}, thread: null, threadReplies: [], typing: {},
     prefs: { notify: {}, sound: 'chime', pauseUntil: 0 },
+    view: 'today', today: null,
     collapsed: new Set(JSON.parse(store.get('kaizenhq_collapsed') || '[]')),
   };
   const EMOJI = ['👍', '🎉', '🔥', '🙌', '❤️', '😂', '👀', '✅', '🏡', '🔑', '💯', '🙏', '😮', '💪', '📈', '⭐'];
@@ -90,7 +91,10 @@
       const last = store.get('kaizenhq_last');
       const start = [fromLink, last].find((id) => id && S.channels[id]) || (Object.values(S.channels).find((c) => c.name === 'general') || Object.values(S.channels)[0])?.id;
       S.messages = {};
-      if (start) openChannel(start);
+      // Home screen is "Today" unless the app was opened from a notification for a specific channel.
+      if (fromLink && S.channels[fromLink]) openChannel(fromLink);
+      else { if (start) S.current = start; showToday(); }
+      refreshToday();
       socket.emit('visible', { visible: !document.hidden });
       setupAppBanners();
       const sw = $('#storage-banner');
@@ -109,12 +113,21 @@
       if (channelId === S.current) { renderHeader(); updateComposer(); }
     });
     socket.on('user:update', (u) => { S.users[u.id] = u; if (u.id === S.me.id) { S.me = u; renderMe(); } renderSidebar(); renderMessages(); renderThread(); });
-    socket.on('dashboard', (d) => { S.dash = d; renderDashboard(); });
+    socket.on('dashboard', (d) => { S.dash = d; renderDashboard(); refreshToday(); });
+    socket.on('channel:meta', ({ channelId, stage, links }) => {
+      const c = S.channels[channelId];
+      if (!c) return;
+      c.stage = stage; c.links = links;
+      if (channelId === S.current) renderChecklist();
+    });
     socket.on('templates', (t) => { S.templates = t; renderChecklist(); });
     socket.on('branding', (b) => { S.branding = b; renderBranding(); });
     socket.on('channel:checklist', ({ channelId, checklist }) => {
       if (!S.channels[channelId]) return;
       S.channels[channelId].checklist = checklist;
+      refreshToday();
+      if (S.messages[channelId] && viewing(channelId)) { const box = $('#messages'); const top = box.scrollTop; renderMessages(); box.scrollTop = top; }
+      renderThread();
       if (channelId === S.current) { renderChecklist(); renderHeader(); }
     });
     socket.on('message:new', onNewMessage);
@@ -180,7 +193,7 @@
     s = s.replace(/`([^`\n]+)`/g, (_, c) => { blocks.push(`<code>${c}</code>`); return `\u0000${blocks.length - 1}\u0000`; });
     s = s.replace(/(https?:\/\/[^\s<]+[^\s<.,;:!?)\]'"])/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
     s = s.replace(/\*\*([^*\n]+)\*\*|\*([^*\n]+)\*/g, (_, a, b) => `<strong>${a || b}</strong>`);
-    s = s.replace(/(^|[\s(])_([^_\n]+)_(?=$|[\s).,!?])/g, '$1<em>$2</em>');
+    s = s.replace(/(^|[\s(])_([^_\n]+)_(?=$|[\s).,!?:;])/g, '$1<em>$2</em>');
     s = s.replace(/~([^~\n]+)~/g, '<del>$1</del>');
     s = s.replace(/^&gt; ?(.*)$\n?/gm, '<blockquote>$1</blockquote>');
     const names = Object.values(S.users).flatMap((u) => [u.name, u.name.split(' ')[0]]).sort((a, b) => b.length - a.length).map((n) => esc(n).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
@@ -204,18 +217,19 @@
   function renderSidebar() {
     if (!S.me) return;
     const all = Object.values(S.channels).filter((c) => !c.archived || c.id === S.current);
+    $('#today-item').classList.toggle('active', S.view === 'today');
     const byName = (a, b) => channelLabel(a).localeCompare(channelLabel(b), undefined, { numeric: true });
     const tops = all.filter((c) => !c.isDM && !c.parentId).sort(byName);
     const dms = all.filter((c) => c.isDM).sort(byName);
     const childrenOf = (id) => all.filter((c) => c.parentId === id).sort(byName);
     const muted = (c) => levelOf(c) === 'mute';
     // Same rule as the app-icon badge: DMs and "All messages" channels count every unread message, others count @mentions.
-    const badgeFor = (c) => (c.id === S.current || muted(c) ? 0 : c.isDM || levelOf(c) === 'all' ? c.unread : c.mentions) || 0;
+    const badgeFor = (c) => (viewing(c.id) || muted(c) ? 0 : c.isDM || levelOf(c) === 'all' ? c.unread : c.mentions) || 0;
     const item = (c, { child = false, kids = [] } = {}) => {
       const isOpen = !S.collapsed.has(c.id);
       const hidden = kids.length && !isOpen ? kids : [];
       const unreadHere = (c.unread && c.id !== S.current && !muted(c)) || hidden.some((k) => k.unread && !muted(k));
-      const cls = ['side-item', child && 'child', c.id === S.current && 'active', unreadHere && 'unread', muted(c) && 'muted-chan', c.archived && 'archived'].filter(Boolean).join(' ');
+      const cls = ['side-item', child && 'child', viewing(c.id) && 'active', unreadHere && 'unread', muted(c) && 'muted-chan', c.archived && 'archived'].filter(Boolean).join(' ');
       let icon = c.isPrivate ? '<span class="hash lock">🔒</span>' : '<span class="hash">#</span>';
       if (c.isDM) {
         const other = c.members.find((id) => id !== S.me.id) || S.me.id;
@@ -256,6 +270,9 @@
   // ---------- Channel ----------
   function openChannel(id) {
     if (!id || !S.channels[id]) return;
+    S.view = 'channel';
+    document.body.classList.remove('view-today');
+    $('#today-view').classList.add('hidden');
     S.current = id;
     store.set('kaizenhq_last', id);
     S.channels[id].unread = 0;
@@ -431,6 +448,7 @@
     const actions = m.deleted ? '' : `<div class="msg-actions">
         <button data-act="react" title="Add reaction">😊</button>
         ${!inThread ? '<button data-act="thread" title="Reply in thread">💬</button>' : ''}
+        <button data-act="task" title="Make this a task">☑</button>
         <button data-act="pin" title="${m.pinned ? 'Unpin' : 'Pin'}">📌</button>
         ${m.lead ? `<button data-act="hot" title="${m.hot ? 'Not hot anymore' : 'Mark as a hot lead'}">${m.hot ? '🧊' : '🔥'}</button>` : ''}
         ${mine ? '<button data-act="edit" title="Edit">✏️</button>' : ''}
@@ -444,6 +462,7 @@
         <div class="msg-head"><span class="msg-author" data-user="${m.userId}">${esc(u?.name || 'Unknown')}</span>${u?.isBot ? `<span class="tag">${u.integration ? 'App' : 'AI'}</span>` : ''}${u?.title ? `<span class="msg-role">${esc(u.title)}</span>` : ''}<span class="msg-time" title="${new Date(m.ts).toLocaleString()}">${fmtTime(m.ts)}</span></div>
         ${body}
         ${m.tasks && !m.deleted ? tasksHTML(m) : ''}
+        ${!m.deleted ? msgTaskChips(m) : ''}
         ${reactions || thread ? `<div class="reactions">${reactions}${reactions ? '<button class="reaction add" data-act="react" title="Add reaction">＋</button>' : ''}</div>${thread}` : ''}
       </div>
       ${actions}
@@ -476,6 +495,8 @@
     if (author && author.dataset.user !== S.me.id) return openDM(author.dataset.user);
     if (!el) return;
     const id = el.dataset.mid;
+    const chip = e.target.closest('[data-topen]');
+    if (chip) return openTaskEditor({ channelId: chip.dataset.ch, itemId: chip.dataset.topen });
     const tk = e.target.closest('[data-task]');
     if (tk) {
       tk.disabled = true;
@@ -491,6 +512,7 @@
     if (act === 'react') emojiPicker(a, (emoji) => S.socket.emit('reaction', { messageId: id, emoji }));
     if (act === 'thread') openThread(id);
     if (act === 'pin') S.socket.emit('message:pin', { messageId: id });
+    if (act === 'task') { const mm = findMsg(id); if (mm) openTaskEditor({ create: { channelId: mm.channelId, label: plainText(mm.text), sourceMessageId: mm.id } }); }
     if (act === 'hot') { const mm = findMsg(id); S.socket.emit('lead:hot', { messageId: id, hot: !mm?.hot }, (r) => r?.error ? toast(r.error) : toast(mm?.hot ? 'Removed from hot leads' : '🔥 Added to hot leads')); }
     if (act === 'delete' && confirm('Delete this message? This cannot be undone.')) S.socket.emit('message:delete', { messageId: id });
     if (act === 'edit') startEdit(el, findMsg(id));
@@ -515,13 +537,14 @@
   }
 
   function onNewMessage(m) {
+    if (m.userId !== S.me.id && mentionsMe(m)) refreshToday();
     const c = S.channels[m.channelId];
     if (!c) return;
     if (m.parentId) {
       if (S.thread?.id === m.parentId) { S.threadReplies.push(m); renderThread(true); }
     } else {
       if (S.messages[m.channelId]) S.messages[m.channelId].push(m);
-      if (m.channelId === S.current) {
+      if (viewing(m.channelId)) {
         renderMessages();
         renderHeader();
         scrollBottom(m.userId === S.me.id ? true : false);
@@ -565,7 +588,7 @@
     return c.isDM || mentionsMe(m) || lvl === 'all';
   }
   function alert(m, c) {
-    const lookingAtIt = !document.hidden && document.hasFocus() && m.channelId === S.current && !m.parentId;
+    const lookingAtIt = !document.hidden && document.hasFocus() && viewing(m.channelId) && !m.parentId;
     if (!lookingAtIt || !document.hidden) playSound(S.prefs.sound, lookingAtIt ? 0.35 : 1);
     if (!document.hidden) return; // the app is on screen: sound + unread badge is enough
     if (S.pushOn) return; // the server's push notification covers this
@@ -753,6 +776,18 @@
         <div class="sub" style="margin-top:6px">Plays while Kaizen HQ is open. When the app is closed, your phone uses its standard notification sound.</div>
       </div>
       <div class="set-block">
+        <div class="set-title">Quiet hours</div>
+        <div class="sub" style="margin-bottom:8px">No phone notifications during these hours. Everything waits for you in ☀️ Today and your morning summary.</div>
+        <div class="time-row"><label class="check-row" style="margin:0"><input type="checkbox" id="q-on" ${S.prefs.quiet?.on !== false ? 'checked' : ''}> On</label>
+          <span>from</span><input type="time" id="q-start" value="${esc(S.prefs.quiet?.start || '21:00')}"><span>to</span><input type="time" id="q-end" value="${esc(S.prefs.quiet?.end || '07:00')}"></div>
+      </div>
+      <div class="set-block">
+        <div class="set-title">Daily summary</div>
+        <div class="sub" style="margin-bottom:8px">One message each morning: what's overdue, due today, waiting for you, decisions needed and what the team finished yesterday.</div>
+        <div class="time-row"><label class="check-row" style="margin:0"><input type="checkbox" id="s-on" ${S.prefs.summary?.on !== false ? 'checked' : ''}> Send it at</label>
+          <input type="time" id="s-time" value="${esc(S.prefs.summary?.time || '07:30')}"><button class="btn small-btn" id="s-now">Send me one now</button></div>
+      </div>
+      <div class="set-block">
         <div class="set-title">Pause notifications</div>
         <div class="sub" style="margin-bottom:8px">${pauseText}</div>
         <div class="chip-row">
@@ -786,7 +821,13 @@
         if (reg) reg.showNotification('Kaizen HQ', opts); else new Notification('Kaizen HQ', opts);
       }
     };
-    body.onchange = (e) => { const sel = e.target.closest('[data-chan]'); if (sel) savePrefs({ channelId: sel.dataset.chan, level: sel.value }); };
+    body.onchange = (e) => {
+      const sel = e.target.closest('[data-chan]');
+      if (sel) return savePrefs({ channelId: sel.dataset.chan, level: sel.value });
+      if (['q-on', 'q-start', 'q-end'].includes(e.target.id)) { const quiet = { on: $('#q-on').checked, start: $('#q-start').value, end: $('#q-end').value }; S.prefs.quiet = quiet; savePrefs({ quiet }); toast('Quiet hours saved'); }
+      if (['s-on', 's-time'].includes(e.target.id)) { const summary = { on: $('#s-on').checked, time: $('#s-time').value }; S.prefs.summary = summary; savePrefs({ summary }); toast('Daily summary saved'); }
+    };
+    $('#s-now').onclick = () => S.socket.emit('summary:now', {}, (r) => r?.error ? toast(r.error) : toast('Summary sent. Check your messages from Kaizen HQ'));
   }
 
   function renderProfileSettings(body) {
@@ -846,7 +887,7 @@
     });
   }
 
-  window.addEventListener('focus', () => S.current && S.socket?.emit('read', { channelId: S.current }));
+  window.addEventListener('focus', () => viewing(S.current) && S.socket?.emit('read', { channelId: S.current }));
 
   // ---------- Typing ----------
   function onTyping({ channelId, parentId, userId }) {
@@ -1192,7 +1233,8 @@
   let clOpen = null; // explicit open/close for the current channel; null = automatic
   function clVisible() {
     const c = S.channels[S.current];
-    if (!c || c.isDM) return false;
+    if (!c || S.view !== 'channel') return false;
+    if (c.isDM && !c.checklist?.length && clOpen === null) return false;
     if (clOpen !== null) return clOpen;
     return isWide() && !!c.checklist?.length && clPref();
   }
@@ -1205,12 +1247,13 @@
     if (!show || !c) return;
     const list = c.checklist || [];
     const done = list.filter((t) => t.doneBy).length;
-    $('#cl-title').textContent = c.parentId ? `☑ ${c.label || c.name}` : `☑ #${c.name}`;
+    $('#cl-title').textContent = c.isDM ? '☑ Tasks' : c.parentId ? `☑ ${c.label || c.name}` : `☑ #${c.name}`;
     $('#cl-progress').innerHTML = list.length ? `<span>${done} of ${list.length} done</span>${bar(pct(done, list.length))}` : '';
+    const top = c.isDM ? '' : stageBarHTML(c) + linksHTML(c);
     const who = (id) => (id === S.me.id ? 'You' : S.users[id]?.name.split(' ')[0] || 'Someone');
     const day = (ts) => new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' });
     if (!list.length) {
-      $('#cl-body').innerHTML = `<div class="cl-empty"><p>No checklist for this channel yet.</p>
+      $('#cl-body').innerHTML = top + `<div class="cl-empty"><p>No checklist for this channel yet.</p>
         ${(S.templates || []).map((t) => `<button class="btn cl-tpl" data-apply="${esc(t.id)}">＋ ${esc(t.name)} checklist</button>`).join('')}
         <p class="sub">Or type your own tasks below.</p></div>`;
       return;
@@ -1222,12 +1265,12 @@
       s.items.push(t);
     }
     const canRemove = (t) => t.addedBy === S.me.id || c.createdBy === S.me.id || S.me.isAdmin;
-    $('#cl-body').innerHTML = sections.map((s) => `
+    $('#cl-body').innerHTML = top + sections.map((s) => `
       <div class="cl-section">
         ${s.name ? `<div class="cl-sec-head"><span>${esc(s.name)}</span><span>${s.items.filter((t) => t.doneBy).length}/${s.items.length}</span></div>` : ''}
         ${s.items.map((t) => `<div class="cl-item${t.doneBy ? ' done' : ''}">
           <button class="cl-check" data-toggle-item="${t.id}" aria-label="${t.doneBy ? 'Mark not done' : 'Mark done'}">${t.doneBy ? '✓' : ''}</button>
-          <div class="cl-text"><span>${esc(t.label)}</span>${t.doneBy ? `<small>${esc(who(t.doneBy))} · ${day(t.doneAt)}</small>` : ''}</div>
+          <div class="cl-text"><span class="cl-label" data-open-item="${t.id}">${esc(t.label)}</span>${t.doneBy ? `<small>${esc(who(t.doneBy))} · ${day(t.doneAt)}</small>` : taskMetaHTML(t, { compact: true })}</div>
           ${canRemove(t) ? `<button class="cl-rm" data-rm-item="${t.id}" aria-label="Remove task" title="Remove task">✕</button>` : ''}
         </div>`).join('')}
       </div>`).join('') + `
@@ -1245,6 +1288,17 @@
       if (it) { it.doneBy = it.doneBy ? null : S.me.id; it.doneAt = Date.now(); renderChecklist(); renderHeader(); if (it.doneBy) playSound('pop', 0.5); }
       return S.socket.emit('checklist:toggle', { channelId: c.id, itemId: tg.dataset.toggleItem }, (r) => r?.error && toast(r.error));
     }
+    const op = e.target.closest('[data-open-item]');
+    if (op) return openTaskEditor({ channelId: c.id, itemId: op.dataset.openItem });
+    const st = e.target.closest('[data-stage]');
+    if (st) {
+      const target = STAGES.find((x) => x.id === st.dataset.stage);
+      if (target.id === c.stage) return;
+      const adds = !(c.appliedTemplates || []).includes(target.id) && (S.templates || []).some((t) => t.id === target.id);
+      if (!confirm(`Move ${c.label || c.name} to "${target.label}"?${adds ? `\n\nThis adds the ${target.label} tasks to the checklist.` : ''}`)) return;
+      return S.socket.emit('channel:stage', { channelId: c.id, stage: target.id }, (r) => r?.error ? toast(r.error) : toast(`Moved to ${target.label}`));
+    }
+    if (e.target.closest('#links-edit')) return linksModal(c);
     const rm = e.target.closest('[data-rm-item]');
     if (rm) return S.socket.emit('checklist:remove', { channelId: c.id, itemId: rm.dataset.rmItem }, (r) => r?.error && toast(r.error));
     const ap = e.target.closest('[data-apply]');
@@ -1275,6 +1329,282 @@
     renderChecklist(); renderHeader();
   });
   window.addEventListener('resize', () => { if (S.me) { renderChecklist(); renderHeader(); } });
+
+  // ---------- Tasks: Today screen, editor, stages, record links ----------
+  const viewing = (id) => S.view === 'channel' && S.current === id;
+  const STAGES = [{ id: 'listing', label: 'Listing' }, { id: 'offer', label: 'Offer accepted' }, { id: 'firm', label: 'Firm sale' }, { id: 'closing', label: 'Closing' }];
+  const plainText = (t) => String(t || '').replace(/```[\s\S]*?```/g, ' ').replace(/[*_`~>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  const firstName = (id) => (id === S.me.id ? 'You' : (S.users[id]?.name || 'Someone').split(' ')[0]);
+
+  function dueInfo(ts) {
+    if (!ts) return null;
+    const d = new Date(ts), now = new Date();
+    const startOf = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+    const days = Math.round((startOf(d) - startOf(now)) / 864e5);
+    const time = d.getHours() === 17 && d.getMinutes() === 0 ? '' : ' ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    let text, cls = '';
+    if (ts < Date.now()) { cls = 'overdue'; text = days === 0 ? `Due today${time}` : `Overdue · ${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}`; }
+    else if (days === 0) { cls = 'today'; text = `Today${time}`; }
+    else if (days === 1) text = `Tomorrow${time}`;
+    else if (days < 7) text = d.toLocaleDateString([], { weekday: 'short' }) + time;
+    else text = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    return { text, cls };
+  }
+
+  function taskMetaHTML(t, { compact = false } = {}) {
+    const bits = [];
+    const due = dueInfo(t.dueAt);
+    if (due) bits.push(`<span class="tchip due ${due.cls}">📅 ${esc(due.text)}</span>`);
+    if (t.assigneeId) bits.push(`<span class="tchip owner">${avatar(S.users[t.assigneeId], 'xs')}${esc(firstName(t.assigneeId))}</span>`);
+    if (t.handoff?.state === 'pending') bits.push(`<span class="tchip pending">⏳ Waiting for ${esc(firstName(t.assigneeId))} to accept</span>`);
+    if (t.handoff?.state === 'declined' && t.assigneeId === S.me.id && !compact) bits.push(`<span class="tchip declined">↩️ ${esc(firstName(t.handoff.declinedBy))}: "${esc(t.handoff.reason)}"</span>`);
+    if (t.blocked) bits.push(`<span class="tchip blocked" title="${esc(t.blocked.reason)}">⛔ ${esc(compact ? 'Blocked' : t.blocked.reason)}</span>`);
+    if (t.sourceMessageId && compact) bits.push('<span class="tchip src">💬</span>');
+    return bits.length ? `<span class="tmeta">${bits.join('')}</span>` : '';
+  }
+
+  function msgTaskChips(m) {
+    const list = (S.channels[m.channelId]?.checklist || []).filter((t) => t.sourceMessageId === m.id);
+    if (!list.length) return '';
+    return `<div class="msg-tasks">${list.map((t) => `<button class="msg-task${t.doneBy ? ' done' : ''}" data-topen="${t.id}" data-ch="${m.channelId}">
+      ${t.doneBy ? '✅' : '☑'} <b>${esc(t.label)}</b> ${t.assigneeId ? `· ${esc(firstName(t.assigneeId))}` : '· no owner'}${t.handoff?.state === 'pending' ? ' · ⏳ waiting to accept' : ''}${t.dueAt && !t.doneBy ? ` · ${esc(dueInfo(t.dueAt).text)}` : ''}</button>`).join('')}</div>`;
+  }
+
+  function stageBarHTML(c) {
+    const isListing = c.stage || S.channels[c.parentId]?.name === 'listings';
+    if (!isListing) return '';
+    const idx = STAGES.findIndex((s) => s.id === (c.stage || 'listing'));
+    return `<div class="stage-bar">${STAGES.map((s, i) => `<button class="stage${i < idx ? ' past' : ''}${i === idx ? ' current' : ''}" data-stage="${s.id}">${i < idx ? '✓ ' : ''}${esc(s.label)}</button>`).join('<span class="stage-sep">›</span>')}</div>`;
+  }
+
+  function linksHTML(c) {
+    const l = c.links || {};
+    const chips = [];
+    if (l.fub) chips.push(`<a class="link-chip" href="${esc(l.fub)}" target="_blank" rel="noopener noreferrer">👤 Follow Up Boss</a>`);
+    if (l.drive) chips.push(`<a class="link-chip" href="${esc(l.drive)}" target="_blank" rel="noopener noreferrer">📁 Drive folder</a>`);
+    if (l.listing) chips.push(`<a class="link-chip" href="${esc(l.listing)}" target="_blank" rel="noopener noreferrer">🏠 Listing</a>`);
+    if (l.other) chips.push(`<a class="link-chip" href="${esc(l.other)}" target="_blank" rel="noopener noreferrer">🔗 ${esc(l.otherLabel || 'Link')}</a>`);
+    const card = l.fubPersonId ? `<div class="fub-card" id="fub-card" data-person="${l.fubPersonId}"><span class="muted">Loading contact from Follow Up Boss…</span></div>` : '';
+    if (l.fubPersonId) setTimeout(() => loadFubCard(c), 0);
+    return `<div class="links-box"><div class="links-row">${chips.join('')}<button class="link-chip add" id="links-edit">${chips.length ? '✎ Links' : '＋ Add links: Follow Up Boss, Drive, listing'}</button></div>${card}</div>`;
+  }
+
+  const fubCardCache = {};
+  function loadFubCard(c) {
+    const id = c.links?.fubPersonId;
+    const el = document.getElementById('fub-card');
+    if (!id || !el) return;
+    const paint = (p) => {
+      const card = document.getElementById('fub-card');
+      if (!card) return;
+      if (!p || p.error) { card.innerHTML = `<span class="muted">${p?.error === 'Not found' ? 'Contact not found in Follow Up Boss.' : 'Could not load the contact right now.'}</span>`; return; }
+      if (p.notConnected) { card.innerHTML = '<span class="muted">Connect Follow Up Boss in Settings → Integrations to see live contact details.</span>'; return; }
+      card.innerHTML = `<div class="fub-top"><strong>${esc(p.name)}</strong>${p.stage ? `<span class="tchip">${esc(p.stage)}</span>` : ''}</div>
+        <div class="sub">${[p.phone && `📞 <a href="tel:${esc(p.phone)}">${esc(p.phone)}</a>`, p.email && `✉️ <a href="mailto:${esc(p.email)}">${esc(p.email)}</a>`].filter(Boolean).join(' · ')}</div>
+        <div class="sub">${[p.assignedTo && `Agent: ${esc(p.assignedTo)}`, p.source && `Source: ${esc(p.source)}`].filter(Boolean).join(' · ')}</div>
+        <div class="fub-note">Live from Follow Up Boss, the client record. Update details there.</div>`;
+    };
+    const hit = fubCardCache[id];
+    if (hit && Date.now() - hit.at < 60000) return paint(hit.p);
+    S.socket.emit('fub:person', { channelId: c.id, personId: id }, (r) => { const p = r.person || { error: r.error }; fubCardCache[id] = { at: Date.now(), p }; paint(p); });
+  }
+
+  function linksModal(c) {
+    const l = c.links || {};
+    modal('Links to the original records', `
+      <p class="sub" style="margin-top:0">Keep client details in Follow Up Boss. Link to them here instead of copying them.</p>
+      <div class="field">👤 Follow Up Boss contact<input id="lk-fub" type="url" autocomplete="off" placeholder="https://…followupboss.com/2/people/view/12345" value="${esc(l.fub || '')}"></div>
+      <div class="field">📁 Google Drive folder<input id="lk-drive" type="url" autocomplete="off" placeholder="https://drive.google.com/drive/folders/…" value="${esc(l.drive || '')}"></div>
+      <div class="field">🏠 Listing (MLS / realtor.ca / website)<input id="lk-listing" type="url" autocomplete="off" placeholder="https://www.realtor.ca/…" value="${esc(l.listing || '')}"></div>
+      <div class="goal-grid"><div class="field">🔗 Other link name<input id="lk-olabel" type="text" maxlength="30" placeholder="e.g. Showing feedback" value="${esc(l.otherLabel || '')}"></div>
+        <div class="field">Other link<input id="lk-other" type="url" autocomplete="off" placeholder="https://…" value="${esc(l.other || '')}"></div></div>
+      <p class="error" id="lk-err"></p>
+      <div class="modal-actions"><button class="btn" data-close>Cancel</button><button class="btn-gold" id="lk-save">Save links</button></div>`);
+    $('#lk-save').onclick = () => S.socket.emit('channel:links', { channelId: c.id, links: { fub: $('#lk-fub').value, drive: $('#lk-drive').value, listing: $('#lk-listing').value, other: $('#lk-other').value, otherLabel: $('#lk-olabel').value } }, (r) => {
+      if (r.error) return ($('#lk-err').textContent = r.error);
+      closeModal(); toast('Links saved');
+    });
+  }
+
+  // ----- Task editor (create from a message, or edit any task) -----
+  function openTaskEditor({ channelId, itemId, create }) {
+    const chId = create ? create.channelId : channelId;
+    const c = S.channels[chId];
+    if (!c) return toast('Open the channel first.');
+    const t = create ? { label: create.label, assigneeId: S.me.id, dueAt: null, blocked: null, handoff: null, sourceMessageId: create.sourceMessageId }
+      : (c.checklist || []).find((x) => x.id === itemId);
+    if (!t) return toast('That task was removed.');
+    const people = Object.values(S.users).filter((u) => !u.isBot && (c.members.includes(u.id) || (!c.isPrivate && !c.isDM))).sort((a, b) => a.name.localeCompare(b.name));
+    const d = t.dueAt ? new Date(t.dueAt) : null;
+    const pad = (n) => String(n).padStart(2, '0');
+    const dateVal = d ? `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` : '';
+    const timeVal = d ? `${pad(d.getHours())}:${pad(d.getMinutes())}` : '17:00';
+    const src = t.sourceMessageId ? (S.messages[chId] || []).find((m) => m.id === t.sourceMessageId) : null;
+    const pending = t.handoff?.state === 'pending';
+    modal(create ? '☑ New task' : '☑ Task', `
+      <div class="field">Task<textarea id="te-label" rows="2" maxlength="200">${esc(t.label)}</textarea></div>
+      <div class="goal-grid">
+        <div class="field">Owner<select id="te-owner"><option value="">No owner yet</option>${people.map((u) => `<option value="${u.id}" ${u.id === t.assigneeId ? 'selected' : ''}>${esc(u.name)}${u.id === S.me.id ? ' (me)' : ''}${!c.members.includes(u.id) ? ' · will be added' : ''}</option>`).join('')}</select></div>
+        <div class="field">Due<div class="due-row"><input id="te-date" type="date" value="${dateVal}"><input id="te-time" type="time" value="${timeVal}"></div></div>
+      </div>
+      <div class="field hidden" id="te-note-wrap">Note for the new owner<input id="te-note" type="text" maxlength="300" autocomplete="off" placeholder="Context so they can pick it up, e.g. where the files are"></div>
+      <div class="sub" id="te-hand-hint" style="margin:-4px 0 10px"></div>
+      ${pending ? `<div class="hand-box">⏳ Waiting for <b>${esc(firstName(t.assigneeId))}</b> to accept${t.handoff.note ? `: "${esc(t.handoff.note)}"` : ''}</div>` : ''}
+      ${t.handoff?.state === 'declined' ? `<div class="hand-box declined">↩️ ${esc(firstName(t.handoff.declinedBy))} passed it back: "${esc(t.handoff.reason)}"</div>` : ''}
+      <label class="check-row"><input type="checkbox" id="te-blocked" ${t.blocked ? 'checked' : ''}> ⛔ Blocked / needs a decision</label>
+      <div class="field ${t.blocked ? '' : 'hidden'}" id="te-reason-wrap"><input id="te-reason" type="text" maxlength="300" autocomplete="off" placeholder="What's needed, e.g. Seller to decide on the price" value="${esc(t.blocked?.reason || '')}"></div>
+      <div class="te-context">
+        <span>${c.isDM ? '💬 Direct message' : `# ${esc(fullLabel(c))}`}</span>
+        ${t.sourceMessageId ? `<button class="cl-link" id="te-src">💬 Open the original conversation</button>` : ''}
+      </div>
+      ${src ? `<blockquote class="te-quote">${esc(plainText(src.text)).slice(0, 220)}<br><small>${esc(S.users[src.userId]?.name || '')}</small></blockquote>` : ''}
+      <p class="error" id="te-err"></p>
+      <div class="modal-actions">
+        ${!create && (t.addedBy === S.me.id || c.createdBy === S.me.id || S.me.isAdmin) ? '<button class="btn danger" id="te-del">Delete</button>' : ''}
+        ${!create ? `<button class="btn" id="te-done">${t.doneBy ? 'Reopen' : '✓ Mark done'}</button>` : ''}
+        <button class="btn-gold" id="te-save">${create ? 'Create task' : 'Save'}</button>
+      </div>`);
+    const syncHand = () => {
+      const owner = $('#te-owner').value;
+      const handing = owner && owner !== S.me.id && owner !== t.assigneeId;
+      $('#te-note-wrap').classList.toggle('hidden', !handing);
+      $('#te-hand-hint').textContent = handing ? `${S.users[owner]?.name.split(' ')[0]} will be asked to accept it. Until then it shows as waiting.` : '';
+    };
+    syncHand();
+    $('#te-owner').onchange = syncHand;
+    $('#te-blocked').onchange = () => $('#te-reason-wrap').classList.toggle('hidden', !$('#te-blocked').checked);
+    if ($('#te-src')) $('#te-src').onclick = () => { closeModal(); jumpTo(chId, t.sourceMessageId); };
+    const err = (m) => { $('#te-err').textContent = m || ''; };
+    const dueValue = () => ($('#te-date').value ? new Date(`${$('#te-date').value}T${$('#te-time').value || '17:00'}`).getTime() : null);
+    $('#te-save').onclick = () => {
+      const label = $('#te-label').value.trim();
+      if (!label) return err('Describe the task.');
+      const blocked = $('#te-blocked').checked ? ($('#te-reason').value.trim() || 'Needs a decision') : null;
+      if (create) {
+        return S.socket.emit('task:create', { channelId: chId, label, assigneeId: $('#te-owner').value || null, dueAt: dueValue(), note: $('#te-note').value, sourceMessageId: t.sourceMessageId }, (r) => {
+          if (r.error) return err(r.error);
+          if (blocked) S.socket.emit('task:edit', { channelId: chId, itemId: r.itemId, blocked });
+          closeModal(); toast('Task created');
+        });
+      }
+      const patch = { channelId: chId, itemId };
+      if (label !== t.label) patch.label = label;
+      const due = dueValue();
+      if (due !== (t.dueAt || null)) patch.dueAt = due;
+      const owner = $('#te-owner').value || null;
+      if (owner !== (t.assigneeId || null) || (owner && t.handoff?.state === 'declined' && owner !== S.me.id)) { patch.assigneeId = owner; patch.note = $('#te-note').value; }
+      if ((blocked || null) !== (t.blocked?.reason || null)) patch.blocked = blocked;
+      S.socket.emit('task:edit', patch, (r) => { if (r.error) return err(r.error); closeModal(); refreshToday(); toast('Task saved'); });
+    };
+    if ($('#te-done')) $('#te-done').onclick = () => S.socket.emit('task:edit', { channelId: chId, itemId, done: !t.doneBy }, (r) => { if (r.error) return err(r.error); closeModal(); if (!t.doneBy) playSound('pop', 0.5); });
+    if ($('#te-del')) $('#te-del').onclick = () => { if (confirm('Delete this task?')) S.socket.emit('checklist:remove', { channelId: chId, itemId }, (r) => { if (r?.error) return err(r.error); closeModal(); }); };
+  }
+
+  // ----- Today -----
+  let todayTimer = null;
+  function refreshToday() {
+    if (!S.socket) return;
+    clearTimeout(todayTimer);
+    todayTimer = setTimeout(() => S.socket.emit('today:get', {}, (d) => { S.today = d; renderTodayBadge(); if (S.view === 'today') renderToday(); }), 120);
+  }
+  function renderTodayBadge() {
+    const n = S.today?.count || 0;
+    const b = $('#today-badge');
+    b.textContent = n; b.classList.toggle('hidden', !n);
+  }
+  function showToday() {
+    S.view = 'today';
+    document.body.classList.add('view-today');
+    $('#today-view').classList.remove('hidden');
+    $('#sidebar').classList.remove('open');
+    $('#panel').classList.add('hidden'); document.body.classList.remove('thread-open');
+    renderChecklist();
+    renderSidebar();
+    renderToday();
+    refreshToday();
+  }
+  $('#today-item').addEventListener('click', showToday);
+
+  function todayRow(v, kind) {
+    const due = dueInfo(v.dueAt);
+    const l = v.links || {};
+    const recLinks = [l.fub && `<a href="${esc(l.fub)}" target="_blank" rel="noopener noreferrer" title="Follow Up Boss">👤</a>`, l.drive && `<a href="${esc(l.drive)}" target="_blank" rel="noopener noreferrer" title="Drive folder">📁</a>`, l.listing && `<a href="${esc(l.listing)}" target="_blank" rel="noopener noreferrer" title="Listing">🏠</a>`].filter(Boolean).join('');
+    let extra = '';
+    if (kind === 'accept') extra = `${v.handoff.note ? `<div class="t-note">"${esc(v.handoff.note)}"</div>` : ''}<div class="t-actions"><button class="btn-gold small-btn" data-accept>Accept</button><button class="btn small-btn" data-decline>Pass it back…</button></div>`;
+    if (kind === 'returned') extra = `<div class="t-note">↩️ ${esc(firstName(v.handoff.declinedBy))}: "${esc(v.handoff.reason)}"</div>`;
+    if (kind === 'blocked') extra = `<div class="t-note">⛔ ${esc(v.blocked.reason)}${v.blocked.by ? ` · flagged by ${esc(firstName(v.blocked.by))}` : ''}</div>`;
+    const who = kind === 'accept' ? `From ${esc(firstName(v.handoff.fromId))}` : kind === 'waiting' ? `With ${esc(firstName(v.assigneeId))} · ⏳ not accepted yet` : kind === 'blocked' && v.assigneeId ? esc(firstName(v.assigneeId)) : '';
+    return `<div class="t-row" data-ch="${v.channelId}" data-item="${v.itemId}">
+      ${kind === 'accept' || kind === 'waiting' ? '<span class="t-dot">🤝</span>' : '<button class="cl-check" data-tdone aria-label="Mark done"></button>'}
+      <div class="t-main"><div class="t-label" data-topen-row>${esc(v.label)}</div>
+        <div class="t-meta"><button class="tchip chan" data-goto>${v.isDM ? '💬' : '#'} ${esc(v.channelName)}</button>${due ? `<span class="tchip due ${due.cls}">📅 ${esc(due.text)}</span>` : ''}${who ? `<span class="tchip">${who}</span>` : ''}${v.sourceMessageId ? '<button class="tchip src" data-src>💬 conversation</button>' : ''}${recLinks ? `<span class="rec-links">${recLinks}</span>` : ''}</div>
+        ${extra}</div></div>`;
+  }
+
+  function renderToday() {
+    const el = $('#today-view');
+    const d = S.today;
+    const now = new Date();
+    const hello = now.getHours() < 12 ? 'Good morning' : now.getHours() < 17 ? 'Good afternoon' : 'Good evening';
+    if (!d) { el.innerHTML = `<div class="today-head"><h1>☀️ Today</h1><p class="sub">Loading…</p></div>`; return; }
+    const sec = (icon, title, items, render, opts = {}) => items.length ? `<section class="t-sec ${opts.cls || ''}"><h3>${icon} ${title} <span>${items.length}</span></h3>${items.map(render).join('')}</section>` : '';
+    const leadRow = (s, own) => `<div class="t-row" data-leadmsg="${s.messageId}" data-ch="${s.channelId}"><span class="t-dot">🏡</span><div class="t-main"><div class="t-label">${esc(s.label)}</div>
+      <div class="t-meta">${s.lead ? `<span class="tchip">${esc(s.lead)}</span>` : ''}${s.url ? `<a class="tchip" href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">👤 Follow Up Boss ↗</a>` : ''}<span class="tchip">${own ? 'You claimed it' : 'Needs an owner'}</span></div></div></div>`;
+    const mentionRow = (m) => `<div class="t-row" data-mention="${m.messageId}" data-ch="${m.channelId}"><span class="t-dot">${avatar(S.users[m.from], 'xs')}</span><div class="t-main">
+      <div class="t-label">${esc(S.users[m.from]?.name || 'Someone')} <span class="muted">in ${esc(m.channelName)}</span></div><div class="t-quote">${esc(plainText(m.text))}</div></div></div>`;
+    const body = [
+      sec('🤝', 'Waiting for you to accept', d.toAccept, (v) => todayRow(v, 'accept'), { cls: 'hot' }),
+      sec('↩️', 'Passed back to you', d.returned, (v) => todayRow(v, 'returned')),
+      sec('⏰', 'Overdue', d.overdue, (v) => todayRow(v), { cls: 'hot' }),
+      sec('📅', 'Due today', d.dueToday, (v) => todayRow(v)),
+      sec('⛔', 'Blocked / decisions needed', d.blocked, (v) => todayRow(v, 'blocked')),
+      sec('💬', 'Mentions', d.mentions, mentionRow),
+      sec('🏡', 'Your lead steps', d.leadSteps, (s) => leadRow(s, true)),
+      sec('🆕', 'Lead steps with no owner', d.needOwner, (s) => leadRow(s, false)),
+      sec('🗓', 'Coming up this week', d.upcoming, (v) => todayRow(v)),
+      sec('📤', 'Waiting on others to accept', d.waitingOn, (v) => todayRow(v, 'waiting')),
+      d.noDate.length ? `<details class="t-sec"><summary><h3>📝 No due date <span>${d.noDate.length}</span></h3></summary>${d.noDate.map((v) => todayRow(v)).join('')}</details>` : '',
+    ].join('');
+    const nothing = !d.toAccept.length && !d.overdue.length && !d.dueToday.length && !d.blocked.length && !d.mentions.length && !d.leadSteps.length && !d.returned.length;
+    el.innerHTML = `<div class="today-wrap">
+      <div class="today-head"><div><h1>☀️ ${hello}, ${esc(S.me.name.split(' ')[0])}</h1>
+        <p class="sub">${now.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' })} · just your assignments, deadlines and mentions${d.doneToday ? ` · ✅ ${d.doneToday} done today` : ''}</p></div>
+        <button class="btn" id="today-new">＋ Task</button></div>
+      <div class="today-stats">
+        <div class="${d.toAccept.length ? 'warn' : ''}"><b>${d.toAccept.length}</b><span>to accept</span></div>
+        <div class="${d.overdue.length ? 'bad' : ''}"><b>${d.overdue.length}</b><span>overdue</span></div>
+        <div><b>${d.dueToday.length}</b><span>due today</span></div>
+        <div><b>${d.mentions.length}</b><span>mentions</span></div>
+      </div>
+      ${nothing ? `<div class="today-clear">✨ You're all caught up. ${d.upcoming.length ? `${d.upcoming.length} task${d.upcoming.length === 1 ? '' : 's'} coming up this week.` : ''}</div>` : ''}
+      ${body}</div>`;
+    $('#today-new').onclick = () => {
+      const c = S.channels[S.current] || Object.values(S.channels).find((x) => x.name === 'general');
+      openTaskEditor({ create: { channelId: c.id, label: '', sourceMessageId: null } });
+    };
+  }
+
+  $('#today-view').addEventListener('click', (e) => {
+    const row = e.target.closest('[data-ch]');
+    if (!row || e.target.closest('a')) return;
+    const ch = row.dataset.ch, item = row.dataset.item;
+    if (e.target.closest('[data-accept]')) return S.socket.emit('task:respond', { channelId: ch, itemId: item, accept: true }, (r) => { refreshToday(); r.error ? toast(r.error) : toast('Accepted. It\'s yours'); });
+    if (e.target.closest('[data-decline]')) {
+      const reason = prompt('Pass it back with a short reason (e.g. "I\'m away Sunday, can Sarah do it?")');
+      if (reason === null) return;
+      return S.socket.emit('task:respond', { channelId: ch, itemId: item, accept: false, reason }, (r) => { refreshToday(); r.error ? toast(r.error) : toast('Passed back'); });
+    }
+    if (e.target.closest('[data-tdone]')) {
+      e.target.closest('[data-tdone]').classList.add('ticking');
+      playSound('pop', 0.5);
+      return S.socket.emit('task:edit', { channelId: ch, itemId: item, done: true }, (r) => { refreshToday(); if (r.error) toast(r.error); });
+    }
+    if (e.target.closest('[data-goto]')) { openChannel(ch); clOpen = true; renderChecklist(); renderHeader(); return; }
+    if (e.target.closest('[data-src]')) { const v = (S.channels[ch]?.checklist || []).find((x) => x.id === item); return v && jumpTo(ch, v.sourceMessageId); }
+    if (row.dataset.mention) return jumpTo(ch, row.dataset.mention);
+    if (row.dataset.leadmsg) return jumpTo(ch, row.dataset.leadmsg);
+    if (item) openTaskEditor({ channelId: ch, itemId: item });
+  });
 
   // ---------- Dashboard: forecast, goals, urgent, hot leads ----------
   const money = (n) => {
@@ -1407,10 +1737,10 @@
     const list = S.dash.urgent;
     const ago = (ts) => { const m = Math.round((Date.now() - ts) / 60000); return m < 60 ? `${m}m` : m < 1440 ? `${Math.round(m / 60)}h` : `${Math.round(m / 1440)}d`; };
     modal('Urgent', `
-      ${list.length ? list.map((u) => `<div class="urgent-row" ${u.kind === 'task' ? `data-jump="${u.messageId}" data-chan="${u.channelId}"` : ''}>
+      ${list.length ? list.map((u) => `<div class="urgent-row" ${u.kind === 'task' ? `data-jump="${u.messageId}" data-chan="${u.channelId}"` : u.kind === 'ctask' ? `data-ctask="${u.id}" data-chan="${u.channelId}"` : ''}>
         <div class="grow"><div><strong>${esc(u.label)}</strong></div>
           <div class="sub">${u.lead ? esc(u.lead) + ' · ' : ''}${esc(u.status)} · ${ago(u.since)} ago</div></div>
-        ${u.kind === 'task' ? '<span class="go">Open ›</span>' : `${u.link ? `<a class="btn" href="${esc(u.link)}" target="_blank" rel="noopener noreferrer">Open</a>` : ''}<button class="btn" data-done="${u.id}">Done</button>`}
+        ${u.kind === 'task' || u.kind === 'ctask' ? '<span class="go">Open ›</span>' : `${u.link ? `<a class="btn" href="${esc(u.link)}" target="_blank" rel="noopener noreferrer">Open</a>` : ''}<button class="btn" data-done="${u.id}">Done</button>`}
       </div>`).join('') : '<p class="muted">Nothing urgent. 🎉</p>'}
       <h4 class="modal-sub">Add an urgent item</h4>
       <div class="field"><input id="urg-text" type="text" autocomplete="off" maxlength="140" placeholder="e.g. Offer deadline for 24 Juniper at 5pm"></div>
@@ -1423,6 +1753,8 @@
       if (d) return S.socket.emit('urgent:done', { id: d.dataset.done }, () => setTimeout(urgentModal, 300));
       const j = e.target.closest('[data-jump]');
       if (j && !e.target.closest('a, button')) { closeModal(); jumpTo(j.dataset.chan, j.dataset.jump); }
+      const ct = e.target.closest('[data-ctask]');
+      if (ct) { closeModal(); openTaskEditor({ channelId: ct.dataset.chan, itemId: ct.dataset.ctask }); }
     };
   }
   $('#dash-forecast').addEventListener('click', forecastModal);
@@ -1486,7 +1818,7 @@
   window.addEventListener('appinstalled', () => $('#install-banner').classList.add('hidden'));
   document.addEventListener('visibilitychange', () => {
     S.socket?.emit('visible', { visible: !document.hidden });
-    if (!document.hidden && S.current) S.socket?.emit('read', { channelId: S.current });
+    if (!document.hidden && viewing(S.current)) S.socket?.emit('read', { channelId: S.current });
   });
 
   const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;

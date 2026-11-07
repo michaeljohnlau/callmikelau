@@ -10,6 +10,7 @@ const { Server } = require('socket.io');
 const webpush = require('web-push');
 const { mountMcp } = require('./mcp');
 const { mountIntegrations } = require('./integrations');
+const { mountTasks, dueInDays } = require('./tasks');
 
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
@@ -175,6 +176,8 @@ function prefsOf(u) {
   u.prefs.notify = u.prefs.notify || {};
   if (!SOUNDS.includes(u.prefs.sound)) u.prefs.sound = 'chime';
   u.prefs.pauseUntil = u.prefs.pauseUntil || 0;
+  u.prefs.quiet = { on: true, start: '21:00', end: '07:00', ...(u.prefs.quiet || {}) };
+  u.prefs.summary = { on: true, time: '07:30', ...(u.prefs.summary || {}) };
   return u.prefs;
 }
 
@@ -221,7 +224,7 @@ function channelView(c, user) {
   return {
     id: c.id, name: c.name, label: c.label || '', topic: c.topic, isDM: c.isDM, members: c.members, createdBy: c.createdBy,
     parentId: c.parentId || null, archived: !!c.archived, isDefault: !!c.isDefault, unread, mentions,
-    checklist: c.checklist || null, isPrivate: !!c.isPrivate,
+    checklist: c.checklist || null, isPrivate: !!c.isPrivate, stage: c.stage || null, links: c.links || null,
   };
 }
 const browseView = (c) => ({ id: c.id, name: c.name, label: c.label || '', topic: c.topic, parentId: c.parentId || null, archived: !!c.archived, isPrivate: !!c.isPrivate, memberCount: c.members.length });
@@ -277,9 +280,11 @@ function badgeCount(u) {
   return total;
 }
 
+let quietCheck = () => false; // set by the tasks module
 function pushTo(userId, payload) {
   const u = db.users[userId];
   if (!u?.push?.length || isWatching(userId)) return;
+  if (!payload.urgent && quietCheck(u)) return; // quiet hours: it waits for the daily summary / next app open
   for (const sub of [...u.push]) {
     webpush.sendNotification(sub, JSON.stringify(payload), { TTL: 3600, urgency: 'high' }).catch((err) => {
       if (err.statusCode === 404 || err.statusCode === 410) {
@@ -352,7 +357,7 @@ function postMessage(user, channelId, text, parentId, opts = {}) {
   }
   save();
   emitToChannel(c, 'message:new', messageView(m));
-  notifyRecipients(c, m, user);
+  if (!opts.silent) notifyRecipients(c, m, user);
   if (m.tasks || m.lead) dashboardChanged();
   return m;
 }
@@ -398,6 +403,7 @@ function updateTask(user, messageId, taskId, action) {
 const currentYear = () => Number(new Date().toLocaleString('en-CA', { timeZone: 'America/Toronto', year: 'numeric' }));
 const GOAL_FIELDS = ['goalGci', 'goalDeals', 'closedGci', 'closedDeals', 'pendingGci', 'pendingDeals'];
 let hotFromFub = () => []; // replaced by the Follow Up Boss integration
+let urgentExtra = () => []; // replaced by the tasks module
 
 function dashboard(viewer) {
   const visible = (c) => !viewer || canSee(viewer, c);
@@ -450,6 +456,8 @@ function dashboard(viewer) {
     seen.add(key);
     hot.push({ personId: m.lead.personId, name: m.lead.name, detail: [m.lead.type && m.lead.type[0].toUpperCase() + m.lead.type.slice(1), m.lead.address].filter(Boolean).join(' · '), url: m.lead.url, messageId: m.id, channelId: m.channelId, source: 'team' });
   }
+  urgent.push(...urgentExtra(viewer));
+  urgent.sort((a, b) => (a.kind === 'custom' ? 0 : 1) - (b.kind === 'custom' ? 0 : 1) || a.since - b.since);
   return { year, team, agents, urgent: urgent.slice(0, 30), hot: hot.slice(0, 40) };
 }
 
@@ -469,7 +477,9 @@ function parseTemplate(t) {
     const line = raw.trim();
     if (!line) continue;
     if (line.startsWith('#')) { section = line.replace(/^#+\s*/, '').slice(0, 60); continue; }
-    items.push({ section, label: line.replace(/^[-*•]\s*/, '').slice(0, 160) });
+    const due = /\s*\|\s*(\d{1,3})\s*d(?:ays?)?\s*$/i.exec(line);
+    const label = (due ? line.slice(0, due.index) : line).replace(/^[-*•]\s*/, '').trim().slice(0, 160);
+    if (label) items.push({ section, label, dueDays: due ? Number(due[1]) : null });
   }
   return items.slice(0, 100);
 }
@@ -478,10 +488,15 @@ function applyTemplate(c, templateId, user) {
   const t = db.checklistTemplates[templateId];
   if (!t) throw new Error('Checklist template not found.');
   c.checklist = c.checklist || [];
-  for (const it of parseTemplate(t)) {
-    c.checklist.push({ id: uid(), label: it.label, section: it.section, doneBy: null, doneAt: null, addedBy: user?.id || null, custom: false });
+  const items = parseTemplate(t);
+  for (const it of items) {
+    c.checklist.push({
+      id: uid(), label: it.label, section: it.section, doneBy: null, doneAt: null, addedBy: user?.id || null, custom: false,
+      assigneeId: null, dueAt: it.dueDays !== null ? dueInDays(it.dueDays) : null, handoff: null, blocked: null, sourceMessageId: null, createdAt: Date.now(),
+    });
   }
   c.checklist = c.checklist.slice(0, 200);
+  return items.length;
 }
 
 function checklistChanged(c) {
@@ -512,7 +527,11 @@ function createChannel(user, { name, topic, parentId, templateId, isPrivate, mem
   };
   // Sub-channels under #listings get the "New listing" checklist unless told otherwise.
   if (templateId === undefined && parent?.name === 'listings' && db.checklistTemplates.listing) templateId = 'listing';
-  if (templateId && db.checklistTemplates[templateId]) applyTemplate(c, templateId, user);
+  if (templateId && db.checklistTemplates[templateId]) {
+    applyTemplate(c, templateId, user);
+    c.appliedTemplates = [templateId];
+    if (templateId === 'listing') c.stage = 'listing';
+  }
   db.channels[id] = c;
   save();
   for (const mid of members) emitToUser(mid, 'channel:joined', channelView(c, db.users[mid]));
@@ -664,6 +683,7 @@ mountMcp(app, {
   canSee, displayName, messageView, postMessage, createChannel, channelSlug, updateTask,
   checklistChanged, applyTemplate, uid, templates: () => db.checklistTemplates,
   dashboard: (viewer) => dashboard(viewer),
+  get tasks() { return tasks; },
 });
 
 const integrations = mountIntegrations(app, {
@@ -672,6 +692,15 @@ const integrations = mountIntegrations(app, {
   io: () => io,
 });
 hotFromFub = () => integrations.hotLeads();
+
+const tasks = mountTasks({
+  get db() { return db; },
+  save, uid, canSee, displayName, postMessage, pushTo, prefsOf, publicUser, applyTemplate, checklistChanged, dashboardChanged,
+  emitToChannel, emitToUser, channelView: (c, u) => channelView(c, u), io: () => io,
+  fubPerson: (id) => integrations.getPerson(id),
+});
+quietCheck = (u) => tasks.inQuietHours(u);
+urgentExtra = (viewer) => tasks.urgentFor(viewer);
 
 const server = http.createServer(app);
 io = new Server(server);
@@ -811,7 +840,7 @@ io.on('connection', (socket) => {
   // ----- Channel checklists -----
   const clChannel = (channelId) => {
     const c = db.channels[channelId];
-    if (!canSee(me(), c) || c.isDM) throw new Error('Channel not found.');
+    if (!canSee(me(), c)) throw new Error('Channel not found.');
     return c;
   };
   const clHandler = (fn) => (data, cb) => { try { fn(data || {}); cb?.({ ok: true }); } catch (e) { cb?.({ error: e.message }); } };
@@ -819,8 +848,7 @@ io.on('connection', (socket) => {
     const c = clChannel(channelId);
     const it = (c.checklist || []).find((x) => x.id === itemId);
     if (!it) throw new Error('Task not found.');
-    if (it.doneBy) { it.doneBy = null; it.doneAt = null; } else { it.doneBy = me().id; it.doneAt = Date.now(); }
-    checklistChanged(c);
+    tasks.editTask(me(), { channelId, itemId, done: !it.doneBy });
   }));
   socket.on('checklist:add', clHandler(({ channelId, label, section }) => {
     const c = clChannel(channelId);
@@ -828,7 +856,7 @@ io.on('connection', (socket) => {
     if (!l) throw new Error('Type the task first.');
     c.checklist = c.checklist || [];
     if (c.checklist.length >= 200) throw new Error('This checklist is full.');
-    c.checklist.push({ id: uid(), label: l, section: String(section || 'Our tasks').slice(0, 60), doneBy: null, doneAt: null, addedBy: me().id, custom: true });
+    c.checklist.push({ id: uid(), label: l, section: String(section || 'Our tasks').slice(0, 60), doneBy: null, doneAt: null, addedBy: me().id, custom: true, assigneeId: null, dueAt: null, handoff: null, blocked: null, sourceMessageId: null, createdAt: Date.now() });
     checklistChanged(c);
   }));
   socket.on('checklist:remove', clHandler(({ channelId, itemId }) => {
@@ -842,7 +870,9 @@ io.on('connection', (socket) => {
   socket.on('checklist:apply', clHandler(({ channelId, templateId }) => {
     const c = clChannel(channelId);
     applyTemplate(c, templateId, me());
+    c.appliedTemplates = [...new Set([...(c.appliedTemplates || []), templateId])];
     checklistChanged(c);
+    dashboardChanged();
   }));
   socket.on('checklist:clear', clHandler(({ channelId }) => {
     const c = clChannel(channelId);
@@ -852,6 +882,7 @@ io.on('connection', (socket) => {
   }));
 
   // ----- Admin: checklist templates & workspace settings -----
+  tasks.registerSocket(socket, me);
   socket.on('templates:get', (_, cb) => cb?.({ templates: Object.values(db.checklistTemplates) }));
   socket.on('templates:save', ({ templates }, cb) => {
     if (!me().isAdmin) return cb?.({ error: 'Admins only.' });
@@ -863,6 +894,8 @@ io.on('connection', (socket) => {
       next[id] = { id, name, text: String(t.text || '').slice(0, 8000) };
     }
     if (!Object.keys(next).length) return cb?.({ error: 'Keep at least one checklist.' });
+    // Remember built-in checklists an admin deleted, so they don't come back on the next update.
+    db.settings.deletedTemplates = [...new Set([...(db.settings.deletedTemplates || []), ...Object.keys(db.checklistTemplates).filter((id) => !next[id])])];
     db.checklistTemplates = next;
     save();
     io.emit('templates', Object.values(next).map((t) => ({ id: t.id, name: t.name })));
@@ -1060,6 +1093,16 @@ io.on('connection', (socket) => {
     if (patch?.channelId && patch.level === null) delete prefs.notify[patch.channelId];
     if (SOUNDS.includes(patch?.sound)) prefs.sound = patch.sound;
     if (typeof patch?.pauseUntil === 'number') prefs.pauseUntil = Math.max(0, patch.pauseUntil);
+    const hhmm = (v) => (/^([01]\d|2[0-3]):[0-5]\d$/.test(String(v)) ? String(v) : null);
+    if (patch?.quiet) {
+      if (typeof patch.quiet.on === 'boolean') prefs.quiet.on = patch.quiet.on;
+      if (hhmm(patch.quiet.start)) prefs.quiet.start = patch.quiet.start;
+      if (hhmm(patch.quiet.end)) prefs.quiet.end = patch.quiet.end;
+    }
+    if (patch?.summary) {
+      if (typeof patch.summary.on === 'boolean') prefs.summary.on = patch.summary.on;
+      if (hhmm(patch.summary.time)) prefs.summary.time = patch.summary.time;
+    }
     save();
     emitToUser(me().id, 'prefs', prefs); // keep the user's other devices in sync
     cb?.({ prefs });

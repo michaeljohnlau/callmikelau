@@ -55,6 +55,7 @@
         </div>
       </header>
       <nav class="side-scroll">
+        <ul class="today-nav"><li class="side-item today-item" id="today-item"><span class="hash">☀️</span><span class="label">Today</span><span class="badge hidden" id="today-badge"></span></li></ul>
         <div class="side-section">
           <div class="side-title"><span>Channels</span><button class="icon-btn small" id="channel-add" title="Create or browse channels" aria-label="Add channel">+</button></div>
           <ul id="channel-list"></ul>
@@ -86,6 +87,7 @@
           <button class="dash-toggle" id="dash-toggle" aria-label="Show or hide dashboard" title="Show or hide dashboard">▾</button>
         </div>
       </section>
+      <section class="today-view hidden" id="today-view" aria-label="Today"></section>
       <header class="chan-header">
         <button class="icon-btn menu-btn" id="menu-btn" aria-label="Open sidebar">☰</button>
         <div class="chan-title-wrap">
