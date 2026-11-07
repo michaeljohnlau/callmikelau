@@ -49,17 +49,22 @@
     store.set(TOKEN_KEY, data.token);
     connect(data.token);
   });
-  $('#logout').addEventListener('click', async (e) => {
-    e.stopPropagation();
+  async function signOut({ everywhere = false } = {}) {
     // Stop sending this device notifications for this account.
     try {
       const reg = await navigator.serviceWorker?.getRegistration();
       const sub = await reg?.pushManager.getSubscription();
       if (sub) { S.socket?.emit('push:unsubscribe', { endpoint: sub.endpoint }); await sub.unsubscribe(); }
+      navigator.clearAppBadge?.().catch(() => {});
     } catch {}
-    await fetch('/api/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + store.get(TOKEN_KEY) } });
+    await fetch(everywhere ? '/api/logout-all' : '/api/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + store.get(TOKEN_KEY) } }).catch(() => {});
     store.del(TOKEN_KEY);
+    store.del('kaizenhq_last');
     location.reload();
+  }
+  $('#logout').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (confirm('Sign out of Kaizen HQ on this device?')) signOut();
   });
 
   // ---------- Socket ----------
@@ -114,6 +119,7 @@
     });
     socket.on('user:update', (u) => { S.users[u.id] = u; if (u.id === S.me.id) { S.me = u; renderMe(); } renderSidebar(); renderMessages(); renderThread(); });
     socket.on('dashboard', (d) => { S.dash = d; renderDashboard(); refreshToday(); });
+    socket.on('signed-out', () => { store.del(TOKEN_KEY); location.reload(); });
     socket.on('channel:meta', ({ channelId, stage, links }) => {
       const c = S.channels[channelId];
       if (!c) return;
@@ -701,6 +707,8 @@
     const tabs = [['notifications', 'Notifications'], ['profile', 'Profile'], ...(S.me.isAdmin ? [['workspace', 'Workspace'], ['integrations', 'Integrations'], ['ai', 'AI & API']] : [])];
     modal('Settings', `<div class="tabs">${tabs.map(([k, t]) => `<button data-tab="${k}" class="${k === tab ? 'active' : ''}">${t}</button>`).join('')}</div><div id="settings-body"></div>`);
     $('.tabs', $('#modal-body')).onclick = (e) => { const b = e.target.closest('[data-tab]'); if (b) openSettings(b.dataset.tab); };
+    // Keep the selected tab visible on narrow screens (the tab strip scrolls sideways).
+    { const strip = $('.tabs', $('#modal-body')); const act = $('.tabs .active', $('#modal-body')); if (strip && act) strip.scrollLeft = Math.max(0, act.offsetLeft - strip.offsetLeft - 24); }
     const body = $('#settings-body');
     if (tab === 'notifications') renderNotifySettings(body);
     if (tab === 'profile') renderProfileSettings(body);
@@ -875,7 +883,15 @@
       <div class="field">Full name<input id="p-name" value="${esc(S.me.name)}" maxlength="60"></div>
       <div class="field">Role<input id="p-title" value="${esc(S.me.title || '')}" maxlength="60" placeholder="e.g. REALTOR®, Team Lead"></div>
       <div class="field">Status<input id="p-status" value="${esc(S.me.status || '')}" maxlength="80" placeholder="e.g. 🏡 At a listing appointment"></div>
-      <div class="modal-actions"><button class="btn-gold" id="p-save">Save</button></div>`;
+      <div class="modal-actions"><button class="btn-gold" id="p-save">Save</button></div>
+      <div class="set-block signout-block">
+        <div class="set-title">Sign out</div>
+        <div class="sub" style="margin-bottom:10px">Signed in as <b>${esc(S.me.email || S.me.name)}</b>.</div>
+        <div class="chip-row"><button class="btn" id="p-signout">↪ Sign out</button><button class="btn danger" id="p-signout-all">Sign out on all devices</button></div>
+        <div class="sub" style="margin-top:8px">"All devices" also signs out your phone, other computers and stops their notifications. Useful if a phone is lost.</div>
+      </div>`;
+    $('#p-signout').onclick = () => signOut();
+    $('#p-signout-all').onclick = () => { if (confirm('Sign out of Kaizen HQ on every device, including your phone?')) signOut({ everywhere: true }); };
     $('#p-photo').onchange = async (e) => {
       const f = e.target.files[0];
       if (!f) return;

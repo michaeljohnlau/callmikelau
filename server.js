@@ -672,6 +672,19 @@ app.post('/api/logout', (req, res) => {
   res.json({ ok: true });
 });
 
+// Sign out everywhere: ends every session for this person (lost phone, shared computer) and
+// stops push notifications to all their devices.
+app.post('/api/logout-all', (req, res) => {
+  const user = userFromToken((req.get('authorization') || '').replace(/^Bearer\s+/i, ''));
+  if (!user) return res.status(401).json({ error: 'Please sign in again.' });
+  let ended = 0;
+  for (const [t, s] of Object.entries(db.sessions)) if (s.userId === user.id) { delete db.sessions[t]; ended++; }
+  user.push = [];
+  save();
+  for (const s of io.sockets.sockets.values()) if (s.data.userId === user.id) { s.emit('signed-out'); s.disconnect(true); }
+  res.json({ ok: true, ended });
+});
+
 // MCP endpoint for AI assistants (Grok, Claude, etc.), authenticated with a bot key.
 mountMcp(app, {
   botAction: (bot, event, payload) => botAction(bot, event, payload),

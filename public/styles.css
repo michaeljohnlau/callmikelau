@@ -431,6 +431,18 @@ button.tchip { cursor: pointer; } button.tchip:hover { color: var(--text); }
   .tm-nums { flex-basis: 100%; order: 3; }
 }
 
+.signout-block { margin-top: 14px; border-top: 1px solid var(--line); border-bottom: 0; }
+/* Settings tabs scroll sideways instead of stretching the window past the screen edge */
+.modal { max-width: min(520px, 100%); min-width: 0; }
+#modal-body { min-width: 0; }
+.tabs { overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.tabs::-webkit-scrollbar { display: none; }
+.tabs button { flex: 1 0 auto; white-space: nowrap; }
+@media (max-width: 760px) {
+  .tabs button { padding: 8px 10px; font-size: 13.5px; }
+  .modal-backdrop { padding-left: 10px; padding-right: 10px; }
+}
+
 /* ---------- AI access ---------- */
 .access-explain { display: grid; gap: 6px; font-size: 13.5px; background: var(--bg-soft); border-radius: 10px; padding: 10px 12px; margin-bottom: 4px; }
 .access-sel { border: 1px solid var(--line); border-radius: 8px; padding: 7px 8px; background: var(--bg); color: var(--text); font-size: 13.5px; }
