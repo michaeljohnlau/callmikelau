@@ -325,6 +325,8 @@ body.view-today .chan-header, body.view-today #messages, body.view-today #typing
 .today-head h1 { font-family: var(--serif); font-size: 28px; margin: 0; }
 .today-head .sub { margin: 4px 0 0; }
 .today-head .btn { white-space: nowrap; flex: none; }
+.today-head .grow { flex: 1; min-width: 0; }
+.today-head .menu-btn { margin: 2px -4px 0 -6px; }
 .today-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 16px 0 6px; }
 .today-stats div { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; display: flex; align-items: baseline; gap: 6px; }
 .today-stats b { font-family: var(--serif); font-size: 24px; }
@@ -389,6 +391,44 @@ button.tchip { cursor: pointer; } button.tchip:hover { color: var(--text); }
   .today-wrap { padding: 16px 12px 30px; }
   .today-head h1 { font-size: 23px; }
   .today-stats { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ---------- Team view ---------- */
+.badge.alert { background: var(--danger); color: #fff; }
+.team-wrap { max-width: 1040px; }
+.team-stats { grid-template-columns: repeat(5, 1fr); }
+.team-stats b.inline-warn { font-family: var(--font); font-size: 13px; color: var(--danger); }
+.team-stats em { font-style: normal; font-weight: 700; font-size: 11.5px; margin-left: 4px; }
+.team-stats em.up { color: var(--online); } .team-stats em.down { color: var(--danger); }
+.tm-person { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 8px; overflow: hidden; }
+.tm-person.has-overdue { border-left: 3px solid var(--danger); }
+.tm-person-head { display: flex; align-items: center; gap: 12px; padding: 10px 12px; cursor: pointer; }
+.tm-person-head:hover { background: var(--bg-hover); }
+.tm-person-head .grow { flex: 0 0 170px; min-width: 0; }
+.tm-nums { flex: 1; display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--muted); }
+.tm-nums b { color: var(--text); font-size: 16px; font-family: var(--serif); margin-right: 3px; }
+.tm-nums .bad b { color: var(--danger); } .tm-nums .warn b { color: var(--gold-dark); }
+.tm-caret { color: var(--muted); }
+.tm-tasks { border-top: 1px solid var(--line); padding: 6px 12px 8px; }
+.tm-task { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; padding: 6px 0; border-bottom: 1px dashed var(--line); }
+.tm-task:last-child { border-bottom: 0; }
+.tm-label { font-weight: 600; font-size: 14px; cursor: pointer; }
+.tm-label:hover { text-decoration: underline; }
+.tm-meta { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.tm-hand { display: flex; gap: 8px; align-items: center; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 6px; }
+.tm-hand .grow { flex: 1; min-width: 0; }
+.tm-listings { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 8px; }
+.tm-listing { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 12px; cursor: pointer; display: flex; flex-direction: column; gap: 7px; }
+.tm-listing:hover { border-color: var(--gold); }
+.tm-l-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.tm-l-head .stage { flex: none; }
+.tm-l-next { font-size: 13px; }
+.tm-listing .agent-bar .dash-bar { background: var(--bg-soft); }
+@media (max-width: 760px) {
+  .team-stats { grid-template-columns: repeat(2, 1fr); }
+  .tm-person-head { flex-wrap: wrap; }
+  .tm-person-head .grow { flex: 1 1 auto; }
+  .tm-nums { flex-basis: 100%; order: 3; }
 }
 
 /* ---------- Private channels ---------- */

@@ -218,6 +218,8 @@
     if (!S.me) return;
     const all = Object.values(S.channels).filter((c) => !c.archived || c.id === S.current);
     $('#today-item').classList.toggle('active', S.view === 'today');
+    $('#team-item').classList.toggle('active', S.view === 'team');
+    $('#team-item').classList.toggle('hidden', !S.me.isAdmin);
     const byName = (a, b) => channelLabel(a).localeCompare(channelLabel(b), undefined, { numeric: true });
     const tops = all.filter((c) => !c.isDM && !c.parentId).sort(byName);
     const dms = all.filter((c) => c.isDM).sort(byName);
@@ -271,7 +273,7 @@
   function openChannel(id) {
     if (!id || !S.channels[id]) return;
     S.view = 'channel';
-    document.body.classList.remove('view-today');
+    document.body.classList.remove('view-today', 'view-team');
     $('#today-view').classList.add('hidden');
     S.current = id;
     store.set('kaizenhq_last', id);
@@ -1505,7 +1507,10 @@
   function refreshToday() {
     if (!S.socket) return;
     clearTimeout(todayTimer);
-    todayTimer = setTimeout(() => S.socket.emit('today:get', {}, (d) => { S.today = d; renderTodayBadge(); if (S.view === 'today') renderToday(); }), 120);
+    todayTimer = setTimeout(() => {
+      S.socket.emit('today:get', {}, (d) => { S.today = d; renderTodayBadge(); if (S.view === 'today') renderToday(); });
+      if (S.me?.isAdmin) S.socket.emit('team:get', {}, (d) => { if (d.error) return; S.team = d; renderTeamBadge(); if (S.view === 'team') renderTeam(); });
+    }, 120);
   }
   function renderTodayBadge() {
     const n = S.today?.count || 0;
@@ -1514,6 +1519,7 @@
   }
   function showToday() {
     S.view = 'today';
+    document.body.classList.remove('view-team');
     document.body.classList.add('view-today');
     $('#today-view').classList.remove('hidden');
     $('#sidebar').classList.remove('open');
@@ -1524,6 +1530,110 @@
     refreshToday();
   }
   $('#today-item').addEventListener('click', showToday);
+  // On phones the Today/Team screens have their own ☰ button (the channel header is hidden there).
+  $('#today-view').addEventListener('click', (e) => { if (e.target.closest('[data-menu]')) { e.stopPropagation(); $('#sidebar').classList.toggle('open'); } }, true);
+
+  // ----- 📊 Team view (admins): everyone's workload, stuck handoffs, listing progress -----
+  function renderTeamBadge() {
+    const n = (S.team?.totals.overdue || 0) + (S.team?.handoffs.filter((h) => h.age > 864e5).length || 0);
+    const b = $('#team-badge');
+    b.textContent = n; b.classList.toggle('hidden', !n);
+  }
+  function showTeam() {
+    S.view = 'team';
+    document.body.classList.add('view-today', 'view-team');
+    $('#today-view').classList.remove('hidden');
+    $('#sidebar').classList.remove('open');
+    $('#panel').classList.add('hidden'); document.body.classList.remove('thread-open');
+    renderChecklist(); renderSidebar();
+    if (!S.team) $('#today-view').innerHTML = '<div class="today-wrap"><h1 class="team-h">📊 Team</h1><p class="sub">Loading…</p></div>';
+    else renderTeam();
+    refreshToday();
+  }
+  $('#team-item').addEventListener('click', showTeam);
+  const openPeople = new Set();
+  const ago = (ms) => { const h = Math.round(ms / 3600e3); return h < 1 ? 'under 1h' : h < 48 ? `${h}h` : `${Math.round(h / 24)} days`; };
+
+  function renderTeam() {
+    const d = S.team;
+    const el = $('#today-view');
+    if (!d) return;
+    const T = d.totals;
+    const trend = T.doneWeek - T.doneLast;
+    const wk = new Date(d.weekStart).toLocaleDateString([], { month: 'long', day: 'numeric' });
+    const taskLine = (v, { showOwner = false, nudge = true } = {}) => {
+      const due = dueInfo(v.dueAt);
+      return `<div class="tm-task" data-ch="${v.channelId}" data-item="${v.itemId}">
+        <span class="tm-label" data-edit>${esc(v.label)}</span>
+        <span class="tm-meta">${showOwner && v.assigneeId ? `<span class="tchip owner">${avatar(S.users[v.assigneeId], 'xs')}${esc(firstName(v.assigneeId))}</span>` : ''}<span class="tchip chan">${v.isDM ? '💬' : '#'} ${esc(v.channelName)}</span>${due ? `<span class="tchip due ${due.cls}">📅 ${esc(due.text)}</span>` : ''}${v.handoff?.state === 'pending' ? '<span class="tchip pending">⏳ not accepted</span>' : ''}${v.blocked ? '<span class="tchip blocked">⛔ blocked</span>' : ''}
+        ${nudge && v.assigneeId && v.assigneeId !== S.me.id ? '<button class="btn small-btn" data-nudge>👋 Nudge</button>' : ''}</span></div>`;
+    };
+    const personCard = (p) => {
+      const open = openPeople.has(p.userId);
+      const u = S.users[p.userId];
+      return `<div class="tm-person${p.overdue ? ' has-overdue' : ''}" data-person="${p.userId}">
+        <div class="tm-person-head" data-toggle-person>
+          ${avatar(u)}<div class="grow"><strong>${esc(p.name)}</strong><div class="sub">${esc(p.title)}</div></div>
+          <div class="tm-nums">
+            <span title="Open tasks"><b>${p.open}</b> open</span>
+            <span class="${p.overdue ? 'bad' : ''}" title="Overdue"><b>${p.overdue}</b> overdue</span>
+            <span class="${p.toAccept ? 'warn' : ''}" title="Handed to them, not accepted yet"><b>${p.toAccept}</b> to accept</span>
+            <span title="Finished this week"><b>${p.doneThisWeek}</b> done</span>
+            ${p.leadSteps ? `<span title="Lead steps claimed, not done"><b>${p.leadSteps}</b> lead steps</span>` : ''}
+          </div><span class="tm-caret">${open ? '▾' : '▸'}</span>
+        </div>
+        ${open ? `<div class="tm-tasks">${p.tasks.length ? p.tasks.slice(0, 30).map((v) => taskLine(v)).join('') : '<p class="muted" style="margin:6px 0">No open tasks.</p>'}</div>` : ''}
+      </div>`;
+    };
+    const stageLabel = (id) => STAGES.find((s) => s.id === id)?.label || 'Listing';
+    const listingCard = (l) => {
+      const p = pct(l.done, l.total);
+      const next = l.next ? `${esc(l.next.label)}${l.next.assigneeId ? ` · ${esc(firstName(l.next.assigneeId))}` : ' · <em>no owner</em>'}${l.next.dueAt ? ` · ${esc(dueInfo(l.next.dueAt).text)}` : ''}` : 'All tasks done 🎉';
+      const lk = l.links || {};
+      return `<div class="tm-listing" data-listing="${l.channelId}">
+        <div class="tm-l-head"><strong>${l.isPrivate ? '🔒 ' : '🏠 '}${esc(l.name)}</strong><span class="stage current">${esc(stageLabel(l.stage))}</span></div>
+        <div class="agent-bar">${bar(p)}<span>${l.done}/${l.total}</span></div>
+        <div class="tm-l-next"><span class="muted">Next:</span> ${next}</div>
+        <div class="tm-meta">${l.overdue ? `<span class="tchip due overdue">⏰ ${l.overdue} overdue</span>` : ''}${l.blocked ? `<span class="tchip blocked">⛔ ${l.blocked} blocked</span>` : ''}
+          ${l.owners.map((id) => `<span class="tchip owner">${avatar(S.users[id], 'xs')}${esc(firstName(id))}</span>`).join('')}
+          <span class="rec-links">${[lk.fub && `<a href="${esc(lk.fub)}" target="_blank" rel="noopener noreferrer" title="Follow Up Boss">👤</a>`, lk.drive && `<a href="${esc(lk.drive)}" target="_blank" rel="noopener noreferrer" title="Drive folder">📁</a>`, lk.listing && `<a href="${esc(lk.listing)}" target="_blank" rel="noopener noreferrer" title="Listing">🏠</a>`].filter(Boolean).join('')}</span>
+          ${l.lastActivity ? `<span class="tchip">💬 ${ago(Date.now() - l.lastActivity)} ago</span>` : ''}</div>
+      </div>`;
+    };
+    el.innerHTML = `<div class="today-wrap team-wrap">
+      <div class="today-head"><button class="icon-btn menu-btn" data-menu aria-label="Open menu">☰</button><div class="grow"><h1>📊 Team</h1><p class="sub">Week of ${esc(wk)} · who's carrying what, what's stuck, and where each listing stands</p></div>
+        <button class="btn" id="team-refresh">↻ Refresh</button></div>
+      <div class="today-stats team-stats">
+        <div><b>${T.open}</b><span>open tasks${T.unassigned ? ` · <b class="inline-warn">${T.unassigned}</b> due soon with no owner` : ''}</span></div>
+        <div class="${T.overdue ? 'bad' : ''}"><b>${T.overdue}</b><span>overdue</span></div>
+        <div class="${T.notAccepted ? 'warn' : ''}"><b>${T.notAccepted}</b><span>not accepted</span></div>
+        <div><b>${T.doneWeek}</b><span>done this week ${trend ? `<em class="${trend > 0 ? 'up' : 'down'}">${trend > 0 ? '▲' : '▼'} ${Math.abs(trend)} vs last</em>` : ''}</span></div>
+        <div><b>${T.newLeads}</b><span>new leads${T.unclaimedSteps ? ` · ${T.unclaimedSteps} steps unclaimed` : ''}</span></div>
+      </div>
+      <section class="t-sec"><h3>👥 People <span>${d.people.length}</span></h3>${d.people.map(personCard).join('')}</section>
+      ${d.handoffs.length ? `<section class="t-sec hot"><h3>🤝 Handoffs not accepted <span>${d.handoffs.length}</span></h3>${d.handoffs.map((h) => `<div class="tm-hand" data-ch="${h.channelId}" data-item="${h.itemId}">
+          <div class="grow"><div class="tm-label" data-edit>${esc(h.label)}</div>
+          <div class="sub">${esc(firstName(h.handoff.fromId))} → <b>${esc(firstName(h.assigneeId))}</b> · waiting ${ago(h.age)} · # ${esc(h.channelName)}</div></div>
+          <button class="btn small-btn" data-nudge>👋 Nudge</button><button class="btn small-btn" data-edit>Reassign</button></div>`).join('')}</section>` : ''}
+      ${d.blocked.length ? `<section class="t-sec"><h3>⛔ Decisions needed <span>${d.blocked.length}</span></h3>${d.blocked.map((v) => `<div class="tm-hand" data-ch="${v.channelId}" data-item="${v.itemId}"><div class="grow"><div class="tm-label" data-edit>${esc(v.label)}</div><div class="sub">⛔ ${esc(v.blocked.reason)} · # ${esc(v.channelName)}${v.assigneeId ? ` · ${esc(firstName(v.assigneeId))}` : ''}</div></div><button class="btn small-btn" data-edit>Open</button></div>`).join('')}</section>` : ''}
+      <section class="t-sec"><h3>🏠 Listings <span>${d.listings.length}</span></h3>${d.listings.length ? `<div class="tm-listings">${d.listings.map(listingCard).join('')}</div>` : '<p class="muted">No listing channels yet. Create a sub-channel under #listings.</p>'}</section>
+    </div>`;
+    $('#team-refresh').onclick = () => { refreshToday(); toast('Refreshed'); };
+  }
+
+  $('#today-view').addEventListener('click', (e) => {
+    if (S.view !== 'team' || e.target.closest('a')) return;
+    const tp = e.target.closest('[data-toggle-person]');
+    if (tp) { const id = tp.closest('[data-person]').dataset.person; openPeople.has(id) ? openPeople.delete(id) : openPeople.add(id); return renderTeam(); }
+    const row = e.target.closest('[data-item]');
+    if (row && e.target.closest('[data-nudge]')) {
+      const b = e.target.closest('[data-nudge]'); b.disabled = true;
+      return S.socket.emit('task:nudge', { channelId: row.dataset.ch, itemId: row.dataset.item }, (r) => { if (r.error) { toast(r.error); b.disabled = false; } else { b.textContent = '✓ Nudged'; toast('Nudge sent'); } });
+    }
+    if (row && e.target.closest('[data-edit]')) return openTaskEditor({ channelId: row.dataset.ch, itemId: row.dataset.item });
+    const l = e.target.closest('[data-listing]');
+    if (l) { openChannel(l.dataset.listing); clOpen = true; renderChecklist(); renderHeader(); }
+  }, true);
 
   function todayRow(v, kind) {
     const due = dueInfo(v.dueAt);
@@ -1567,7 +1677,7 @@
     ].join('');
     const nothing = !d.toAccept.length && !d.overdue.length && !d.dueToday.length && !d.blocked.length && !d.mentions.length && !d.leadSteps.length && !d.returned.length;
     el.innerHTML = `<div class="today-wrap">
-      <div class="today-head"><div><h1>☀️ ${hello}, ${esc(S.me.name.split(' ')[0])}</h1>
+      <div class="today-head"><button class="icon-btn menu-btn" data-menu aria-label="Open menu">☰</button><div class="grow"><h1>☀️ ${hello}, ${esc(S.me.name.split(' ')[0])}</h1>
         <p class="sub">${now.toLocaleDateString([], { weekday: 'long', month: 'long', day: 'numeric' })} · just your assignments, deadlines and mentions${d.doneToday ? ` · ✅ ${d.doneToday} done today` : ''}</p></div>
         <button class="btn" id="today-new">＋ Task</button></div>
       <div class="today-stats">
@@ -1585,6 +1695,7 @@
   }
 
   $('#today-view').addEventListener('click', (e) => {
+    if (S.view !== 'today') return;
     const row = e.target.closest('[data-ch]');
     if (!row || e.target.closest('a')) return;
     const ch = row.dataset.ch, item = row.dataset.item;

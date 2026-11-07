@@ -463,6 +463,106 @@ function mountTasks(core) {
     return list;
   }
 
+  // ---------- Team view (for the team lead) ----------
+  function weekStart(ts) {
+    const p = tzParts(ts);
+    const dow = new Date(Date.UTC(p.y, p.m - 1, p.d)).getUTCDay(); // 0 = Sunday
+    return dayStart(tzEpoch(p.y, p.m, p.d) - ((dow + 6) % 7) * 864e5 + 12 * 3600e3); // Monday 00:00
+  }
+
+  function teamView(viewer) {
+    const t = now();
+    const wk = weekStart(t);
+    const lastWk = weekStart(wk - 3 * 864e5);
+    const weekEnd = wk + 7 * 864e5;
+    const people = Object.values(db.users).filter((u) => !u.isBot && !u.disabled);
+    const stats = Object.fromEntries(people.map((u) => [u.id, { userId: u.id, name: u.name, title: u.title || '', open: 0, overdue: 0, dueThisWeek: 0, toAccept: 0, doneThisWeek: 0, doneLastWeek: 0, blocked: 0, leadSteps: 0, tasks: [] }]));
+    const handoffs = [], blocked = [], listings = [];
+    let open = 0, overdue = 0, doneWeek = 0, doneLast = 0, unassigned = 0;
+    const channels = Object.values(db.channels).filter((c) => !c.archived && core.canSee(viewer, c));
+    for (const c of channels) {
+      const list = (c.checklist || []).map(norm);
+      for (const it of list) {
+        const s = stats[it.assigneeId];
+        if (it.doneBy) {
+          if (it.doneAt >= wk) { doneWeek++; if (stats[it.doneBy]) stats[it.doneBy].doneThisWeek++; }
+          else if (it.doneAt >= lastWk) { doneLast++; if (stats[it.doneBy]) stats[it.doneBy].doneLastWeek++; }
+          continue;
+        }
+        open++;
+        const v = taskView(c, it);
+        const late = it.dueAt && it.dueAt < t;
+        if (late) overdue++;
+        if (!it.assigneeId && it.dueAt && it.dueAt < t + 7 * 864e5) unassigned++; // due soon, nobody on it
+        if (it.handoff?.state === 'pending') handoffs.push({ ...v, age: t - it.handoff.at });
+        if (it.blocked) blocked.push(v);
+        if (!s) continue;
+        s.open++;
+        if (late) s.overdue++;
+        else if (it.dueAt && it.dueAt < weekEnd) s.dueThisWeek++;
+        if (it.handoff?.state === 'pending') s.toAccept++;
+        if (it.blocked) s.blocked++;
+        s.tasks.push(v);
+      }
+      // Listing progress
+      const isListing = c.stage || (c.parentId && db.channels[c.parentId]?.name === 'listings');
+      if (isListing && !c.isDM) {
+        const total = list.length;
+        const done = list.filter((x) => x.doneBy).length;
+        const undone = list.filter((x) => !x.doneBy);
+        const next = undone.filter((x) => x.dueAt).sort((a, b) => a.dueAt - b.dueAt)[0] || undone[0] || null;
+        const lastMsg = db.messages.filter((m) => m.channelId === c.id && !m.deleted).at(-1);
+        listings.push({
+          channelId: c.id, name: c.label || c.name, stage: c.stage || 'listing', total, done,
+          overdue: undone.filter((x) => x.dueAt && x.dueAt < t).length, blocked: undone.filter((x) => x.blocked).length,
+          next: next ? { label: next.label, dueAt: next.dueAt, assigneeId: next.assigneeId } : null,
+          owners: [...new Set(undone.map((x) => x.assigneeId).filter(Boolean))],
+          links: c.links || null, lastActivity: lastMsg?.ts || c.createdAt || null, isPrivate: !!c.isPrivate,
+        });
+      }
+    }
+    // Lead steps (Follow Up Boss alerts) claimed but not done, and new leads this week
+    const member = new Set(channels.map((c) => c.id));
+    let newLeads = 0, newLeadsLast = 0, unclaimedSteps = 0;
+    for (const m of db.messages) {
+      if (m.deleted || !member.has(m.channelId)) continue;
+      if (m.lead) { if (m.ts >= wk) newLeads++; else if (m.ts >= lastWk) newLeadsLast++; }
+      for (const st of m.tasks || []) {
+        if (st.doneBy) continue;
+        if (st.claimedBy && stats[st.claimedBy]) stats[st.claimedBy].leadSteps++;
+        else if (!st.claimedBy && m.ts > t - 14 * 864e5) unclaimedSteps++;
+      }
+    }
+    const order = { overdue: 0 };
+    for (const s of Object.values(stats)) s.tasks.sort((a, b) => (a.dueAt || 9e15) - (b.dueAt || 9e15));
+    const stageIdx = (id) => Math.max(0, STAGES.findIndex((s) => s.id === id));
+    listings.sort((a, b) => b.overdue - a.overdue || stageIdx(a.stage) - stageIdx(b.stage) || a.name.localeCompare(b.name));
+    handoffs.sort((a, b) => b.age - a.age);
+    void order;
+    return {
+      weekStart: wk,
+      totals: { open, overdue, unassigned, notAccepted: handoffs.length, doneWeek, doneLast, newLeads, newLeadsLast, unclaimedSteps, blocked: blocked.length },
+      people: Object.values(stats).sort((a, b) => b.overdue - a.overdue || b.open - a.open || a.name.localeCompare(b.name)),
+      handoffs, blocked, listings,
+    };
+  }
+
+  function nudge(actor, { channelId, itemId }) {
+    const c = channelFor(actor, channelId);
+    const it = itemFor(c, itemId);
+    if (!it.assigneeId || it.doneBy) throw new Error('This task has no open owner to nudge.');
+    if (it.assigneeId === actor.id) throw new Error("That's your own task.");
+    if (it.lastNudgeAt && now() - it.lastNudgeAt < 3600e3) throw new Error('Already nudged in the last hour.');
+    it.lastNudgeAt = now();
+    core.save();
+    const what = it.handoff?.state === 'pending' ? 'Please accept or pass back' : it.dueAt && it.dueAt < now() ? 'This is overdue' : 'Friendly reminder';
+    notify(it.assigneeId, `👋 ${actor.name}: ${what}`, it.label, c);
+    // Also a DM, so it's waiting in the app even during quiet hours.
+    const dm = dmBetween(actor, db.users[it.assigneeId]);
+    core.postMessage(actor, dm.id, `👋 ${what}: **${it.label}** (_${where(c)}_${it.dueAt ? `, due ${niceDate(it.dueAt)}` : ''}). Open ☀️ Today to update it.`, null, { silent: true });
+    return it;
+  }
+
   // ---------- Sockets ----------
   function registerSocket(socket, me) {
     const h = (fn) => (data, cb) => { try { const r = fn(data || {}); cb?.({ ok: true, ...(r && r.id ? { itemId: r.id } : {}) }); } catch (e) { cb?.({ error: e.message }); } };
@@ -472,6 +572,8 @@ function mountTasks(core) {
     socket.on('channel:stage', h((d) => { setStage(me(), d); }));
     socket.on('channel:links', h((d) => { setLinks(me(), d); }));
     socket.on('today:get', (_, cb) => cb?.(today(me())));
+    socket.on('team:get', (_, cb) => { if (!me().isAdmin) return cb?.({ error: 'The team view is for admins.' }); cb?.(teamView(me())); });
+    socket.on('task:nudge', h((d) => { if (!me().isAdmin) throw new Error('Admins only.'); nudge(me(), d); }));
     socket.on('summary:now', (_, cb) => { try { sendSummary(me()); cb?.({ ok: true }); } catch (e) { cb?.({ error: e.message }); } });
     socket.on('fub:person', async ({ personId, channelId }, cb) => {
       try {
@@ -482,7 +584,7 @@ function mountTasks(core) {
     });
   }
 
-  return { registerSocket, today, createTask, editTask, respond, setStage, setLinks, summaryText, sendSummary, inQuietHours, urgentFor, norm, STAGES, dueInDays, tick };
+  return { registerSocket, today, teamView, nudge, createTask, editTask, respond, setStage, setLinks, summaryText, sendSummary, inQuietHours, urgentFor, norm, STAGES, dueInDays, tick };
 }
 
 module.exports = { mountTasks, STAGE_TEMPLATES, STAGES, tzEpoch, dayStart, dueInDays };
