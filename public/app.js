@@ -134,6 +134,14 @@
     socket.on('message:update', onUpdateMessage);
     socket.on('typing', onTyping);
     socket.on('channel:joined', (c) => { S.channels[c.id] = c; delete S.browse[c.id]; renderSidebar(); });
+    socket.on('channel:deleted', ({ channelId, by }) => {
+      const wasHere = viewing(channelId);
+      const name = S.channels[channelId] ? fullLabel(S.channels[channelId]) : '';
+      delete S.channels[channelId]; delete S.browse[channelId]; delete S.messages[channelId];
+      if (S.current === channelId) { S.current = (Object.values(S.channels).find((x) => x.name === 'general') || {}).id; if (wasHere) showToday(); }
+      if (wasHere && by !== S.me.name) toast(`${by} deleted #${name}`);
+      renderSidebar(); refreshToday();
+    });
     socket.on('channel:removed', ({ channelId, browse }) => {
       delete S.channels[channelId];
       if (browse) S.browse[channelId] = browse; else delete S.browse[channelId];
@@ -352,6 +360,7 @@
     if (!c.isDM && (!c.isPrivate || manage)) actions.push(`<button class="btn" id="add-people">＋ Add people</button>`);
     if (!c.isDM) actions.push(`<button class="btn" id="chan-notify">🔔 ${LEVEL_TEXT[levelOf(c)]}</button>`);
     if (canArchive) actions.push(`<button class="btn" id="archive-chan">${c.archived ? 'Unarchive' : '🗄 Archive'}</button>`);
+    if (canArchive) actions.push(`<button class="btn danger" id="delete-chan">🗑 Delete</button>`);
     if (!c.isDM && c.name !== 'general' && !c.isDefault) actions.push(`<button class="btn" id="leave-chan">Leave</button>`);
     const privacy = c.isDM ? '' : `<div class="privacy-row ${c.isPrivate ? 'is-private' : ''}">
         <div class="grow"><strong>${c.isPrivate ? '🔒 Private' : '🌐 Open to everyone'}</strong>
@@ -377,6 +386,7 @@
         if (to && !confirm(`Make #${fullLabel(c)} private? Only its ${c.members.length} current member${c.members.length === 1 ? '' : 's'} will be able to see it.`)) return;
         S.socket.emit('channel:privacy', { channelId: c.id, isPrivate: to }, (res) => { if (res.error) toast(res.error); else { toast(to ? '🔒 Channel is now private' : 'Channel is now open to everyone'); setTimeout(channelDetails, 200); } });
       }
+      if (e.target.id === 'delete-chan') return deleteChannelModal(c);
       if (e.target.id === 'archive-chan') {
         if (!c.archived && !confirm(`Archive #${fullLabel(c)}? It will be hidden from the sidebar, but messages stay searchable and you can unarchive it any time.`)) return;
         S.socket.emit('channel:archive', { channelId: c.id, archived: !c.archived }, (res) => { if (res.error) toast(res.error); else { closeModal(); toast(c.archived ? 'Channel archived' : 'Channel unarchived'); } });
@@ -846,10 +856,11 @@
       const f = e.target.files[0];
       if (!f) return;
       try {
-        const dataUrl = await resizeImage(f, { size: 192, square: true, type: 'image/jpeg' });
+        const dataUrl = await cropImage(f);
+        if (!dataUrl) return openSettings('profile'); // cancelled
         const r = await upload({ kind: 'avatar', dataUrl });
-        S.me.avatar = r.avatar; renderMe(); renderProfileSettings(body); toast('Photo updated');
-      } catch (err) { toast(err.message); }
+        S.me.avatar = r.avatar; renderMe(); openSettings('profile'); toast('Photo updated');
+      } catch (err) { toast(err.message); openSettings('profile'); }
     };
     if ($('#p-photo-rm')) $('#p-photo-rm').onclick = async () => { await upload({ kind: 'avatar', remove: true }); S.me.avatar = ''; renderMe(); renderProfileSettings(body); };
     $('#p-save').onclick = () => { S.socket.emit('profile:update', { name: $('#p-name').value, title: $('#p-title').value, status: $('#p-status').value }); closeModal(); toast('Profile updated'); };
@@ -1126,6 +1137,99 @@
 
   $('#me-bar').addEventListener('click', () => openSettings('profile'));
   $('#settings-open').addEventListener('click', () => openSettings('notifications'));
+
+  // ---------- Delete a channel ----------
+  function deleteChannelModal(c) {
+    const count = (S.messages[c.id] || []).length;
+    const tasks = (c.checklist || []).length;
+    modal(`Delete ${c.parentId ? '' : '#'}${fullLabel(c)}?`, `
+      <div class="hand-box declined">This permanently deletes the channel${count ? `, its messages` : ''}${tasks ? ` and its ${tasks} checklist task${tasks === 1 ? '' : 's'}` : ''} for everyone. It can't be undone.</div>
+      <p class="sub">Just finished with it? <b>Archive</b> instead: it disappears from the sidebar but stays searchable and can be brought back.</p>
+      <div class="field">Type <b>DELETE</b> to confirm<input id="del-confirm" type="text" autocomplete="off" autocapitalize="characters" placeholder="DELETE"></div>
+      <p class="error" id="del-err"></p>
+      <div class="modal-actions"><button class="btn" id="del-archive">🗄 Archive instead</button><button class="btn danger-solid" id="del-go" disabled>Delete forever</button></div>`);
+    const inp = $('#del-confirm');
+    inp.focus();
+    inp.oninput = () => { $('#del-go').disabled = inp.value.trim().toUpperCase() !== 'DELETE'; };
+    $('#del-archive').onclick = () => S.socket.emit('channel:archive', { channelId: c.id, archived: true }, (r) => { if (r.error) return ($('#del-err').textContent = r.error); closeModal(); toast('Channel archived'); });
+    $('#del-go').onclick = () => S.socket.emit('channel:delete', { channelId: c.id, confirm: inp.value }, (r) => {
+      if (r.error) return ($('#del-err').textContent = r.error);
+      closeModal(); toast(`Deleted ${fullLabel(c)}`);
+    });
+  }
+
+  // ---------- Photo cropper: drag to position, slider / pinch / wheel to zoom ----------
+  function cropImage(file) {
+    return new Promise((resolve, reject) => {
+      if (!/^image\//.test(file.type)) return reject(new Error('Please choose an image.'));
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('That image could not be read.')); };
+      img.onload = () => {
+        const V = Math.min(280, window.innerWidth - 80);   // size of the square viewport on screen
+        const W = img.naturalWidth, H = img.naturalHeight;
+        const base = V / Math.min(W, H);                     // smallest scale that fills the square
+        let zoom = 1, scale = base, x = 0, y = 0;
+        const clamp = () => {
+          x = Math.min(0, Math.max(V - W * scale, x));
+          y = Math.min(0, Math.max(V - H * scale, y));
+        };
+        // Start centred left-to-right, and near the top for portrait photos so heads aren't cut off.
+        x = (V - W * scale) / 2;
+        y = H > W ? (V - H * scale) * 0.15 : (V - H * scale) / 2;
+        clamp();
+        modal('Position your photo', `
+          <div class="crop-wrap"><div class="crop-stage" id="crop-stage" style="width:${V}px;height:${V}px">
+            <img id="crop-img" src="${url}" alt="" draggable="false"><div class="crop-ring"></div></div></div>
+          <div class="crop-zoom"><span>－</span><input type="range" id="crop-zoom" min="1" max="4" step="0.01" value="1" aria-label="Zoom"><span>＋</span></div>
+          <p class="sub" style="text-align:center;margin:4px 0 0">Drag to move · slide (or pinch) to zoom</p>
+          <div class="modal-actions"><button class="btn" id="crop-cancel">Cancel</button><button class="btn-gold" id="crop-save">Use this photo</button></div>`);
+        const el = $('#crop-img');
+        const paint = () => { el.style.width = W * scale + 'px'; el.style.height = H * scale + 'px'; el.style.transform = `translate(${x}px, ${y}px)`; };
+        const setZoom = (z, cx = V / 2, cy = V / 2) => {
+          zoom = Math.min(4, Math.max(1, z));
+          const ix = (cx - x) / scale, iy = (cy - y) / scale;      // keep the point under the finger/centre in place
+          scale = base * zoom;
+          x = cx - ix * scale; y = cy - iy * scale;
+          clamp(); paint();
+          $('#crop-zoom').value = zoom;
+        };
+        paint();
+        const stage = $('#crop-stage');
+        const pts = new Map();
+        let last = null, pinch = null;
+        stage.addEventListener('pointerdown', (e) => { stage.setPointerCapture(e.pointerId); pts.set(e.pointerId, { x: e.clientX, y: e.clientY }); last = { x: e.clientX, y: e.clientY }; if (pts.size === 2) { const [a, b] = [...pts.values()]; pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), z: zoom }; } });
+        stage.addEventListener('pointermove', (e) => {
+          if (!pts.has(e.pointerId)) return;
+          pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+          if (pts.size === 2 && pinch) {
+            const [a, b] = [...pts.values()];
+            const r = stage.getBoundingClientRect();
+            setZoom(pinch.z * Math.hypot(a.x - b.x, a.y - b.y) / pinch.d, (a.x + b.x) / 2 - r.left, (a.y + b.y) / 2 - r.top);
+          } else if (pts.size === 1 && last) {
+            x += e.clientX - last.x; y += e.clientY - last.y; last = { x: e.clientX, y: e.clientY };
+            clamp(); paint();
+          }
+        });
+        const end = (e) => { pts.delete(e.pointerId); pinch = null; last = pts.size ? { ...[...pts.values()][0] } : null; };
+        stage.addEventListener('pointerup', end); stage.addEventListener('pointercancel', end);
+        stage.addEventListener('wheel', (e) => { e.preventDefault(); const r = stage.getBoundingClientRect(); setZoom(zoom * (e.deltaY < 0 ? 1.08 : 1 / 1.08), e.clientX - r.left, e.clientY - r.top); }, { passive: false });
+        $('#crop-zoom').oninput = (e) => setZoom(Number(e.target.value));
+        $('#crop-cancel').onclick = () => { URL.revokeObjectURL(url); resolve(null); };
+        $('#crop-save').onclick = () => {
+          const OUT = 256;
+          const cv = document.createElement('canvas');
+          cv.width = cv.height = OUT;
+          const ctx = cv.getContext('2d');
+          ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, OUT, OUT);
+          ctx.drawImage(img, -x / scale, -y / scale, V / scale, V / scale, 0, 0, OUT, OUT);
+          URL.revokeObjectURL(url);
+          resolve(cv.toDataURL('image/jpeg', 0.88));
+        };
+      };
+      img.src = url;
+    });
+  }
 
   // ---------- Branding & uploads ----------
   function renderBranding() {

@@ -431,6 +431,17 @@ button.tchip { cursor: pointer; } button.tchip:hover { color: var(--text); }
   .tm-nums { flex-basis: 100%; order: 3; }
 }
 
+/* ---------- Photo cropper & delete ---------- */
+.crop-wrap { display: flex; justify-content: center; margin: 4px 0 12px; }
+.crop-stage { position: relative; overflow: hidden; border-radius: 12px; background: #111; touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
+.crop-stage:active { cursor: grabbing; }
+.crop-stage img { position: absolute; top: 0; left: 0; max-width: none; transform-origin: 0 0; pointer-events: none; }
+.crop-ring { position: absolute; inset: 0; border-radius: 22%; box-shadow: 0 0 0 999px rgba(0, 0, 0, .45); outline: 2px solid rgba(255, 255, 255, .85); outline-offset: -2px; pointer-events: none; }
+.crop-zoom { display: flex; align-items: center; gap: 10px; max-width: 300px; margin: 0 auto; color: var(--muted); font-weight: 700; }
+.crop-zoom input { flex: 1; accent-color: var(--gold-dark); touch-action: auto; }
+.btn.danger-solid { background: var(--danger); color: #fff; border-color: var(--danger); }
+.btn.danger-solid:disabled { opacity: .45; cursor: not-allowed; }
+
 /* ---------- Private channels ---------- */
 .hash.lock { font-size: 11px; opacity: .85; }
 .privacy-row { display: flex; gap: 10px; align-items: center; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; margin-bottom: 12px; }

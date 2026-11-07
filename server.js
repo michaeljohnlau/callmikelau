@@ -1061,6 +1061,29 @@ io.on('connection', (socket) => {
     cb?.({ ok: true });
   });
 
+  // Permanently delete a channel (and everything in it). Sub-channels first, then their main channel.
+  socket.on('channel:delete', ({ channelId, confirm }, cb) => {
+    const c = db.channels[channelId];
+    if (!c || c.isDM) return cb?.({ error: 'Channel not found.' });
+    if (c.isDefault) return cb?.({ error: `#${c.name} is a built-in channel and can't be deleted.` });
+    if (c.createdBy !== me().id && !me().isAdmin) return cb?.({ error: 'Only the person who created this channel or an admin can delete it.' });
+    if (String(confirm || '').trim().toUpperCase() !== 'DELETE') return cb?.({ error: 'Type DELETE to confirm.' });
+    const subs = Object.values(db.channels).filter((x) => x.parentId === c.id);
+    if (subs.length) return cb?.({ error: `#${c.name} still has ${subs.length} sub-channel${subs.length === 1 ? '' : 's'}. Delete ${subs.length === 1 ? 'it' : 'them'} first (archived ones too).` });
+    if (db.integrations?.fub?.channelId === c.id) return cb?.({ error: 'Follow Up Boss posts new leads here. Pick a different channel in Settings → Integrations first.' });
+    const removed = db.messages.filter((m) => m.channelId === c.id).length;
+    db.messages = db.messages.filter((m) => m.channelId !== c.id);
+    delete db.channels[c.id];
+    for (const u of Object.values(db.users)) {
+      if (u.lastRead) delete u.lastRead[c.id];
+      if (u.prefs?.notify) delete u.prefs.notify[c.id];
+    }
+    save();
+    io.emit('channel:deleted', { channelId: c.id, name: displayName(c), by: me().name });
+    dashboardChanged();
+    cb?.({ ok: true, removed });
+  });
+
   socket.on('dm:open', ({ userId }, cb) => {
     const other = db.users[userId];
     if (!other) return cb?.({ error: 'Not found' });
