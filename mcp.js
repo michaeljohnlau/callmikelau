@@ -59,10 +59,14 @@ function mountMcp(app, core) {
 
   function buildServer(bot) {
     const server = new McpServer({ name: 'kaizen-hq', version: '1.0.0' }, {
-      instructions: `You are ${bot.name}, connected to ${core.workspace}, the private team chat for Kaizen Real Estate Team (Markham, Ontario). `
-        + 'Use list_channels to see channels; sub-channels (e.g. one per listing address) live under main channels such as listings. '
+      instructions: `You are ${bot.name}, a member of ${core.workspace}, the private team workspace for Kaizen Real Estate Team (Markham, Ontario). `
+        + `You have ${bot.access === 'full' ? 'FULL' : 'standard'} access: you can do what a team member can in the app: chat in channels and direct messages, `
+        + 'create listing sub-channels (with checklists and privacy), move listings through stages, add links (Follow Up Boss, Drive, listing), '
+        + 'manage checklists and tasks (assign, due dates, blockers, handoffs), react, pin, edit or delete your own messages, mark hot leads, '
+        + `add urgent items${bot.access === 'full' ? ', archive or delete channels, manage members and privacy, update goals and see the team view' : ''}. `
+        + 'Sub-channels (one per listing address) live under main channels such as listings, e.g. "listings/24-juniper-crescent". '
         + 'Use get_my_mentions to find people asking you for help, read the thread for context, then reply with send_message using thread_id. '
-        + 'Be warm, concise and professional. Never invent listing facts.',
+        + 'Confirm before destructive actions (delete). Be warm, concise and professional. Never invent listing facts; Follow Up Boss is the client record.',
     });
 
     server.registerTool('list_channels', {
@@ -170,24 +174,48 @@ function mountMcp(app, core) {
       return text(hits);
     });
 
+    const act = async (event, payload) => {
+      const r = await core.botAction(bot, event, payload);
+      if (r && r.error) throw new Error(r.error);
+      return r || {};
+    };
+    const run = (fn) => async (args) => { try { return text(await fn(args)); } catch (e) { return error(e.message); } };
+    const mustChannel = (ref) => { const c = resolveChannel(bot, ref); if (!c) throw new Error(`Channel "${ref}" not found. Use list_channels.`); return c; };
+    const person = (name) => {
+      const n = String(name || '').toLowerCase().replace(/^@/, '').trim();
+      const people = Object.values(core.db.users).filter((u) => !u.disabled && !u.integration && u.id !== bot.id);
+      const u = people.find((x) => x.name.toLowerCase() === n) || people.find((x) => x.name.toLowerCase().split(' ')[0] === n);
+      if (!u) throw new Error(`No team member called "${name}". Use list_team.`);
+      return u;
+    };
+    const msgById = (id) => { const m = core.db.messages.find((x) => x.id === id && !x.deleted); if (!m || !core.canSee(bot, core.db.channels[m.channelId])) throw new Error('Message not found.'); return m; };
+    const templateId = (ref) => {
+      const list = Object.values(core.db.checklistTemplates || {});
+      const t = list.find((x) => x.id === ref) || list.find((x) => x.name.toLowerCase() === String(ref).toLowerCase());
+      if (!t) throw new Error(`No checklist called "${ref}". Options: ${list.map((x) => x.name).join(', ')}`);
+      return t.id;
+    };
+
     server.registerTool('create_channel', {
-      title: 'Create a channel or sub-channel',
-      description: 'Create a new channel, or a sub-channel under a main channel, for example a listing address under "listings".',
+      title: 'Create a channel or listing sub-channel',
+      description: 'Create a channel, or a sub-channel under a main channel (e.g. a listing address under "listings"). Listing sub-channels get the "New listing" checklist automatically. Can be private to chosen people.',
       inputSchema: {
         name: z.string().min(1).max(80).describe('Name, e.g. "open-houses" or a listing address like "24 Juniper Crescent"'),
         parent: z.string().optional().describe('Main channel to put it under, e.g. "listings"'),
         topic: z.string().max(200).optional(),
+        checklist: z.string().optional().describe('Checklist template to add, e.g. "New listing" or "Open house". Use "none" for no checklist.'),
+        private: z.boolean().optional().describe('Only the chosen people (and you) can see it'),
+        people: z.array(z.string()).optional().describe('For private channels: team members who can see it'),
       },
-    }, async ({ name, parent, topic }) => {
-      try {
-        const p = parent ? resolveChannel(bot, parent) : null;
-        if (parent && !p) return error(`Parent channel "${parent}" not found.`);
-        const c = core.createChannel(bot, { name, topic, parentId: p?.id });
-        return text({ ok: true, channel: channelInfo(c) });
-      } catch (e) {
-        return error(e.message);
-      }
-    });
+    }, run(async ({ name, parent, topic, checklist, private: priv, people }) => {
+      const p = parent ? mustChannel(parent) : null;
+      const r = await act('channel:create', {
+        name, topic, parentId: p?.id || null,
+        templateId: checklist === undefined ? undefined : checklist === 'none' ? '' : templateId(checklist),
+        isPrivate: !!priv, memberIds: (people || []).map((n) => person(n).id),
+      });
+      return { ok: true, channel: channelInfo(core.db.channels[r.id]) };
+    }));
 
     server.registerTool('list_open_tasks', {
       title: 'List open first steps',
@@ -331,6 +359,225 @@ function mountMcp(app, core) {
         hot_leads: d.hot.map(({ name, detail, url }) => ({ name, detail, url })),
       });
     });
+
+    // ----- Messages -----
+    server.registerTool('edit_message', {
+      title: 'Edit one of your messages', description: 'Change the text of a message you posted.',
+      inputSchema: { message_id: z.string(), text: z.string().min(1).max(4000) },
+    }, run(async ({ message_id, text: t }) => {
+      const m = msgById(message_id);
+      if (m.userId !== bot.id) throw new Error('You can only edit your own messages.');
+      await act('message:edit', { messageId: m.id, text: t });
+      return { ok: true };
+    }));
+    server.registerTool('delete_message', {
+      title: 'Delete a message', description: 'Delete one of your own messages (with full access, any message).',
+      inputSchema: { message_id: z.string() },
+    }, run(async ({ message_id }) => {
+      const m = msgById(message_id);
+      if (m.userId !== bot.id && bot.access !== 'full') throw new Error('You can only delete your own messages.');
+      await act('message:delete', { messageId: m.id });
+      return { ok: true };
+    }));
+    server.registerTool('react_to_message', {
+      title: 'React with an emoji', description: 'Add (or remove, if already there) an emoji reaction on a message.',
+      inputSchema: { message_id: z.string(), emoji: z.string().min(1).max(8).describe('e.g. 👍 🎉 🔥 ✅') },
+    }, run(async ({ message_id, emoji }) => { msgById(message_id); await act('reaction', { messageId: message_id, emoji }); return { ok: true }; }));
+    server.registerTool('pin_message', {
+      title: 'Pin or unpin a message', description: 'Pin a message to the top of its channel, or unpin it.',
+      inputSchema: { message_id: z.string(), pinned: z.boolean().optional().describe('Default true') },
+    }, run(async ({ message_id, pinned = true }) => {
+      const m = msgById(message_id);
+      if (!!m.pinned !== pinned) await act('message:pin', { messageId: m.id });
+      return { ok: true, pinned };
+    }));
+
+    // ----- Direct messages -----
+    const dmWith = async (name) => { const u = person(name); const r = await act('dm:open', { userId: u.id }); return { u, c: core.db.channels[r.id] }; };
+    server.registerTool('send_direct_message', {
+      title: 'Send a direct message', description: 'Send a private direct message to a team member.',
+      inputSchema: { person: z.string().describe('e.g. "Neeraj"'), text: z.string().min(1).max(4000) },
+    }, run(async ({ person: p, text: t }) => {
+      const { u, c } = await dmWith(p);
+      await act('message:send', { channelId: c.id, text: t });
+      return { ok: true, to: u.name };
+    }));
+    server.registerTool('read_direct_messages', {
+      title: 'Read a direct message conversation', description: 'Read your direct messages with a team member.',
+      inputSchema: { person: z.string(), limit: z.number().int().min(1).max(100).optional() },
+      annotations: { readOnlyHint: true },
+    }, run(async ({ person: p, limit = 30 }) => {
+      const { u, c } = await dmWith(p);
+      return { with: u.name, messages: core.db.messages.filter((m) => m.channelId === c.id && !m.parentId).slice(-limit).map(msgInfo) };
+    }));
+    server.registerTool('list_direct_messages', {
+      title: 'List your direct message conversations', description: 'Your direct message conversations, with the latest message in each.',
+      annotations: { readOnlyHint: true },
+    }, run(async () => Object.values(core.db.channels).filter((c) => c.isDM && c.members.includes(bot.id)).map((c) => {
+      const last = core.db.messages.filter((m) => m.channelId === c.id && !m.deleted).at(-1);
+      return { with: c.members.filter((id) => id !== bot.id).map(nameOf).join(', ') || 'yourself', last: last ? msgInfo(last) : null };
+    })));
+
+    // ----- Channels -----
+    server.registerTool('get_channel_info', {
+      title: 'Get channel details', description: 'Topic, members, privacy, listing stage, record links (and live Follow Up Boss contact), archived state and checklist progress.',
+      inputSchema: { channel: z.string() }, annotations: { readOnlyHint: true },
+    }, run(async ({ channel }) => {
+      const c = mustChannel(channel);
+      const list = c.checklist || [];
+      let contact = null;
+      if (c.links?.fubPersonId && core.fubPerson) { try { contact = await core.fubPerson(c.links.fubPersonId); } catch (e) { contact = { error: e.message }; } }
+      return {
+        ...channelInfo(c), private: !!c.isPrivate, stage: c.stage || null,
+        members: c.members.map(nameOf), links: c.links || null, follow_up_boss_contact: contact,
+        checklist: { done: list.filter((t) => t.doneBy).length, total: list.length },
+      };
+    }));
+    server.registerTool('set_channel_topic', {
+      title: 'Set a channel topic', inputSchema: { channel: z.string(), topic: z.string().max(200) },
+    }, run(async ({ channel, topic }) => { const c = mustChannel(channel); await act('channel:topic', { channelId: c.id, topic }); return { ok: true }; }));
+    server.registerTool('join_channel', {
+      title: 'Join a channel', inputSchema: { channel: z.string() },
+    }, run(async ({ channel }) => { const c = mustChannel(channel); await act('channel:join', { channelId: c.id }); return { ok: true }; }));
+    server.registerTool('leave_channel', {
+      title: 'Leave a channel', inputSchema: { channel: z.string() },
+    }, run(async ({ channel }) => { const c = mustChannel(channel); await act('channel:leave', { channelId: c.id }); return { ok: true }; }));
+    server.registerTool('add_people_to_channel', {
+      title: 'Add people to a channel', inputSchema: { channel: z.string(), people: z.array(z.string()).min(1) },
+    }, run(async ({ channel, people }) => {
+      const c = mustChannel(channel);
+      const ids = people.map((n) => person(n).id);
+      await act('channel:addMembers', { channelId: c.id, userIds: ids });
+      return { ok: true, added: ids.map(nameOf) };
+    }));
+    server.registerTool('remove_person_from_channel', {
+      title: 'Remove someone from a private channel (full access)', inputSchema: { channel: z.string(), person: z.string() },
+    }, run(async ({ channel, person: p }) => { const c = mustChannel(channel); await act('channel:removeMember', { channelId: c.id, userId: person(p).id }); return { ok: true }; }));
+    server.registerTool('set_channel_privacy', {
+      title: 'Make a channel private or open (full access)', inputSchema: { channel: z.string(), private: z.boolean() },
+    }, run(async ({ channel, private: priv }) => { const c = mustChannel(channel); await act('channel:privacy', { channelId: c.id, isPrivate: priv }); return { ok: true }; }));
+    server.registerTool('archive_channel', {
+      title: 'Archive or unarchive a channel (full access)', description: 'Archive hides a channel (e.g. a sold listing) but keeps its messages and tasks. Use archived:false to bring it back.',
+      inputSchema: { channel: z.string(), archived: z.boolean().optional().describe('Default true') },
+    }, run(async ({ channel, archived = true }) => { const c = mustChannel(channel); await act('channel:archive', { channelId: c.id, archived }); return { ok: true, archived }; }));
+    server.registerTool('delete_channel', {
+      title: 'Permanently delete a channel (full access)', description: 'Deletes the channel with all its messages and tasks for everyone. Cannot be undone. Ask the person to confirm first, then pass confirm:"DELETE".',
+      inputSchema: { channel: z.string(), confirm: z.literal('DELETE') },
+    }, run(async ({ channel, confirm }) => { const c = mustChannel(channel); const r = await act('channel:delete', { channelId: c.id, confirm }); return { ok: true, messages_deleted: r.removed }; }));
+
+    // ----- Listings: stage & record links -----
+    server.registerTool('set_listing_stage', {
+      title: 'Move a listing to a stage', description: 'Listing → Offer accepted → Firm sale → Closing. Moving to a stage adds that stage\'s tasks (with due dates) to the checklist and posts a note.',
+      inputSchema: { channel: z.string(), stage: z.enum(['listing', 'offer', 'firm', 'closing']) },
+    }, run(async ({ channel, stage }) => { const c = mustChannel(channel); await act('channel:stage', { channelId: c.id, stage }); return { ok: true, stage }; }));
+    server.registerTool('set_channel_links', {
+      title: 'Add links to the original records', description: 'Link the Follow Up Boss contact (URL or person id), Google Drive folder, listing page and one other link. Only the fields you pass are changed; pass "" to remove one.',
+      inputSchema: {
+        channel: z.string(), follow_up_boss: z.string().optional(), drive: z.string().optional(), listing: z.string().optional(),
+        other: z.string().optional(), other_label: z.string().max(30).optional(),
+      },
+    }, run(async ({ channel, follow_up_boss, drive, listing, other, other_label }) => {
+      const c = mustChannel(channel);
+      const cur = c.links || {};
+      const links = {
+        fub: follow_up_boss !== undefined ? follow_up_boss : cur.fub || '',
+        drive: drive !== undefined ? drive : cur.drive || '',
+        listing: listing !== undefined ? listing : cur.listing || '',
+        other: other !== undefined ? other : cur.other || '',
+        otherLabel: other_label !== undefined ? other_label : cur.otherLabel || '',
+      };
+      await act('channel:links', { channelId: c.id, links });
+      return { ok: true, links: core.db.channels[c.id].links };
+    }));
+
+    // ----- Checklists & tasks -----
+    server.registerTool('list_checklist_templates', {
+      title: 'List checklist templates', annotations: { readOnlyHint: true },
+    }, run(async () => Object.values(core.db.checklistTemplates || {}).map((t) => ({ id: t.id, name: t.name }))));
+    server.registerTool('add_checklist_from_template', {
+      title: 'Add a checklist template to a channel', description: 'Adds the tasks of a template (e.g. "Open house") to a channel\'s checklist.',
+      inputSchema: { channel: z.string(), template: z.string() },
+    }, run(async ({ channel, template }) => { const c = mustChannel(channel); await act('checklist:apply', { channelId: c.id, templateId: templateId(template) }); return { ok: true, tasks: (core.db.channels[c.id].checklist || []).length }; }));
+    server.registerTool('edit_task', {
+      title: 'Edit a task', description: 'Change a checklist task: text, owner (assigning someone else is a handoff they must accept), due date, blocker, or done. Pass blocked:"" to clear a blocker and assignee:"" to remove the owner.',
+      inputSchema: {
+        channel: z.string(), item_id: z.string(), task: z.string().max(200).optional(),
+        assignee: z.string().optional(), note: z.string().max(300).optional().describe('Context for the new owner'),
+        due: z.string().optional().describe('YYYY-MM-DD (5pm Toronto) or "YYYY-MM-DD HH:MM"; "" to clear'),
+        blocked: z.string().max(300).optional().describe('Reason it is blocked / needs a decision; "" to clear'),
+        done: z.boolean().optional(),
+      },
+    }, run(async ({ channel, item_id, task, assignee, note, due, blocked, done }) => {
+      const c = mustChannel(channel);
+      const p = { channelId: c.id, itemId: item_id };
+      if (task !== undefined) p.label = task;
+      if (assignee !== undefined) { p.assigneeId = assignee ? person(assignee).id : null; p.note = note; }
+      if (due !== undefined) p.dueAt = due || null;
+      if (blocked !== undefined) p.blocked = blocked || null;
+      if (done !== undefined) p.done = done;
+      await act('task:edit', p);
+      return { ok: true };
+    }));
+    server.registerTool('delete_task', {
+      title: 'Delete a checklist task', inputSchema: { channel: z.string(), item_id: z.string() },
+    }, run(async ({ channel, item_id }) => { const c = mustChannel(channel); await act('checklist:remove', { channelId: c.id, itemId: item_id }); return { ok: true }; }));
+    server.registerTool('remove_checklist', {
+      title: 'Remove a channel\'s whole checklist (full access)', inputSchema: { channel: z.string(), confirm: z.literal('REMOVE') },
+    }, run(async ({ channel }) => { const c = mustChannel(channel); await act('checklist:clear', { channelId: c.id }); return { ok: true }; }));
+    server.registerTool('nudge_task_owner', {
+      title: 'Nudge the owner of a task (full access)', description: 'Sends the owner a reminder (push + direct message). At most once an hour per task.',
+      inputSchema: { channel: z.string(), item_id: z.string() },
+    }, run(async ({ channel, item_id }) => { const c = mustChannel(channel); await act('task:nudge', { channelId: c.id, itemId: item_id }); return { ok: true }; }));
+
+    // ----- Leads, urgent items, goals, team -----
+    server.registerTool('mark_hot_lead', {
+      title: 'Mark a lead as hot', description: 'Add (or remove) a lead alert from the 🔥 hot leads ticker.',
+      inputSchema: { message_id: z.string().describe('The lead alert message id'), hot: z.boolean().optional().describe('Default true') },
+    }, run(async ({ message_id, hot = true }) => { msgById(message_id); await act('lead:hot', { messageId: message_id, hot }); return { ok: true, hot }; }));
+    server.registerTool('add_urgent_item', {
+      title: 'Add an urgent item to the dashboard', inputSchema: { text: z.string().min(1).max(140), link: z.string().optional() },
+    }, run(async ({ text: t, link }) => { await act('urgent:add', { text: t, link }); return { ok: true }; }));
+    server.registerTool('resolve_urgent_item', {
+      title: 'Mark an urgent item done', description: 'Use get_dashboard to find the id (items of kind "custom").', inputSchema: { id: z.string() },
+    }, run(async ({ id }) => { await act('urgent:done', { id }); return { ok: true }; }));
+    server.registerTool('update_goal', {
+      title: 'Update yearly goal numbers (full access)', description: 'Set a team member\'s goal, closed and pending GCI / deals for this year. Only the values you pass change.',
+      inputSchema: {
+        person: z.string(), goal_gci: z.number().min(0).optional(), goal_deals: z.number().min(0).optional(),
+        closed_gci: z.number().min(0).optional(), closed_deals: z.number().min(0).optional(),
+        pending_gci: z.number().min(0).optional(), pending_deals: z.number().min(0).optional(),
+      },
+    }, run(async (a) => {
+      const u = person(a.person);
+      const map = { goal_gci: 'goalGci', goal_deals: 'goalDeals', closed_gci: 'closedGci', closed_deals: 'closedDeals', pending_gci: 'pendingGci', pending_deals: 'pendingDeals' };
+      const values = Object.fromEntries(Object.entries(map).filter(([k]) => a[k] !== undefined).map(([k, v]) => [v, a[k]]));
+      await act('goal:update', { userId: u.id, values });
+      return { ok: true, person: u.name, values };
+    }));
+    server.registerTool('get_team_view', {
+      title: 'Get the team view (full access)', description: 'Each person\'s open, overdue, to-accept and finished tasks, handoffs not accepted, decisions needed, and every listing\'s stage and progress.',
+      annotations: { readOnlyHint: true },
+    }, run(async () => {
+      const d = await act('team:get', {});
+      return {
+        totals: d.totals,
+        people: d.people.map((p) => ({ name: p.name, open: p.open, overdue: p.overdue, to_accept: p.toAccept, done_this_week: p.doneThisWeek, lead_steps: p.leadSteps })),
+        handoffs_not_accepted: d.handoffs.map((h) => ({ task: h.label, from: nameOf(h.handoff.fromId), to: nameOf(h.assigneeId), hours_waiting: Math.round(h.age / 3600e3), channel: h.channelName, channel_id: h.channelId, item_id: h.itemId })),
+        decisions_needed: d.blocked.map((v) => ({ task: v.label, reason: v.blocked.reason, channel: v.channelName })),
+        listings: d.listings.map((l) => ({ name: l.name, stage: l.stage, done: l.done, total: l.total, overdue: l.overdue, next: l.next && { task: l.next.label, owner: l.next.assigneeId ? nameOf(l.next.assigneeId) : null } })),
+      };
+    }));
+    server.registerTool('get_person_today', {
+      title: "Get a team member's Today list", description: 'What a person has to accept, overdue, due today, blocked and coming up (only from channels you can also see).',
+      inputSchema: { person: z.string() }, annotations: { readOnlyHint: true },
+    }, run(async ({ person: p }) => {
+      const u = person(p);
+      const d = core.tasks.today(u);
+      const ok = (v) => core.canSee(bot, core.db.channels[v.channelId]);
+      const slim = (v) => ({ task: v.label, channel: v.channelName, due: v.dueAt ? new Date(v.dueAt).toISOString() : null, blocked: v.blocked?.reason });
+      const pick = (k) => d[k].filter(ok).map(slim);
+      return { person: u.name, to_accept: pick('toAccept'), overdue: pick('overdue'), due_today: pick('dueToday'), blocked: pick('blocked'), upcoming: pick('upcoming') };
+    }));
 
     server.registerTool('list_team', {
       title: 'List team members',

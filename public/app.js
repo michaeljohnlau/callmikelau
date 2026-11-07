@@ -420,9 +420,9 @@
   $('#members-btn').addEventListener('click', channelDetails);
 
   function peoplePicker(exclude = [], preselect = []) {
-    const people = Object.values(S.users).filter((u) => !u.isBot && !exclude.includes(u.id)).sort((a, b) => a.name.localeCompare(b.name));
+    const people = Object.values(S.users).filter((u) => !u.integration && !exclude.includes(u.id)).sort((a, b) => (a.isBot - b.isBot) || a.name.localeCompare(b.name));
     if (!people.length) return '<p class="muted">Everyone on the team is already here.</p>';
-    return `<div class="people-pick">${people.map((u) => `<label class="pick-row">${avatar(u, 'sm')}<span class="grow">${esc(u.name)}<small>${esc(u.title || '')}</small></span><input type="checkbox" value="${u.id}" ${preselect.includes(u.id) ? 'checked' : ''}></label>`).join('')}</div>`;
+    return `<div class="people-pick">${people.map((u) => `<label class="pick-row">${avatar(u, 'sm')}<span class="grow">${esc(u.name)}${u.isBot ? ' <span class="tag">AI</span>' : ''}<small>${esc(u.title || '')}</small></span><input type="checkbox" value="${u.id}" ${preselect.includes(u.id) ? 'checked' : ''}></label>`).join('')}</div>`;
   }
   const pickedIds = (root) => [...root.querySelectorAll('.people-pick input:checked')].map((i) => i.value);
 
@@ -896,22 +896,29 @@
       if (r.error) { body.innerHTML = `<p class="error">${esc(r.error)}</p>`; return; }
       const url = location.origin + '/mcp';
       body.innerHTML = `
-        <p class="sub" style="margin-top:0">Keys created here are your <strong>Kaizen HQ API keys</strong>. Use them to connect an AI assistant such as <strong>Grok</strong> through MCP, or to let Zapier and other apps post with <code>POST /api/v1/messages</code>. It can read channels, search, post, reply in threads and create sub-channels. It cannot see direct messages unless someone messages it directly.</p>
+        <p class="sub" style="margin-top:0">Keys created here are your <strong>Kaizen HQ API keys</strong>. Use them to connect an AI assistant such as <strong>Grok</strong> through MCP, or to let Zapier and other apps post with <code>POST /api/v1/messages</code>.</p>
+        <div class="access-explain"><div><b>Full access</b>: does what a team admin can in the app: chat and direct-message, create listings (with checklists and privacy), move stages, add links, manage tasks and handoffs, react, pin, archive or delete channels, manage members, update goals and see the Team view.</div>
+          <div><b>Standard</b>: everything except archiving/deleting channels, changing privacy or members, goals and the Team view.</div>
+          <div class="sub">No assistant can change bot keys, the sign-up code, the Follow Up Boss connection or checklist templates, or see private channels and DMs it isn't part of. Add it to a private channel like a teammate to give it access.</div></div>
         <div class="set-block"><div class="set-title">Connection URL</div><div class="copy-row"><code>${esc(url)}</code><button class="btn" data-copy="${esc(url)}">Copy</button></div></div>
         <div class="set-block"><div class="set-title">Connected assistants</div>
-          ${r.bots.length ? r.bots.map((b) => `<div class="list-row"><div class="avatar bot">✦</div><div class="grow"><strong>${esc(b.name)}</strong><div class="sub">Key ${esc(b.keyHint || '')} · ${b.lastUsed ? 'last used ' + fmtDay(b.lastUsed) + ' ' + fmtTime(b.lastUsed) : 'not used yet'}</div></div><button class="btn danger" data-revoke="${b.id}">Remove</button></div>`).join('') : '<p class="muted">None yet.</p>'}
+          ${r.bots.length ? r.bots.map((b) => `<div class="list-row"><div class="avatar bot">✦</div><div class="grow"><strong>${esc(b.name)}</strong><div class="sub">Key ${esc(b.keyHint || '')} · ${b.lastUsed ? 'last used ' + fmtDay(b.lastUsed) + ' ' + fmtTime(b.lastUsed) : 'not used yet'}</div></div><select class="access-sel" data-access="${b.id}"><option value="full" ${b.access === 'full' ? 'selected' : ''}>Full access</option><option value="standard" ${b.access !== 'full' ? 'selected' : ''}>Standard</option></select><button class="btn danger" data-revoke="${b.id}">Remove</button></div>`).join('') : '<p class="muted">None yet.</p>'}
         </div>
         <div class="set-block"><div class="set-title">Add an assistant</div>
-          <div class="copy-row"><input id="bot-name" type="text" autocomplete="off" value="Grok" maxlength="40"><button class="btn-gold" id="bot-create">Create key</button></div>
+          <div class="copy-row"><input id="bot-name" type="text" autocomplete="off" value="Grok" maxlength="40"><select id="bot-access" class="access-sel"><option value="full" selected>Full access</option><option value="standard">Standard</option></select><button class="btn-gold" id="bot-create">Create key</button></div>
           <div id="bot-new"></div>
         </div>`;
+      body.onchange = (e) => {
+        const a = e.target.closest('[data-access]');
+        if (a) S.socket.emit('bot:access', { botId: a.dataset.access, access: a.value }, (r) => r.error ? toast(r.error) : toast(a.value === 'full' ? 'Full access on' : 'Standard access'));
+      };
       body.onclick = (e) => {
         const cp = e.target.closest('[data-copy]');
         if (cp) { navigator.clipboard?.writeText(cp.dataset.copy).then(() => toast('Copied')); return; }
         const rv = e.target.closest('[data-revoke]');
         if (rv && confirm('Remove this assistant? Its key will stop working immediately.')) S.socket.emit('bot:revoke', { botId: rv.dataset.revoke }, () => renderAISettings(body));
         if (e.target.id === 'bot-create') {
-          S.socket.emit('bot:create', { name: $('#bot-name').value }, (res) => {
+          S.socket.emit('bot:create', { name: $('#bot-name').value, access: $('#bot-access').value }, (res) => {
             if (res.error) return toast(res.error);
             $('#bot-new').innerHTML = `<div class="key-box"><div class="set-title">🔑 ${esc(res.bot.name)}'s key: copy it now, it won't be shown again</div>
               <div class="copy-row"><code>${esc(res.key)}</code><button class="btn" data-copy="${esc(res.key)}">Copy</button></div>

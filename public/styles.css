@@ -431,6 +431,11 @@ button.tchip { cursor: pointer; } button.tchip:hover { color: var(--text); }
   .tm-nums { flex-basis: 100%; order: 3; }
 }
 
+/* ---------- AI access ---------- */
+.access-explain { display: grid; gap: 6px; font-size: 13.5px; background: var(--bg-soft); border-radius: 10px; padding: 10px 12px; margin-bottom: 4px; }
+.access-sel { border: 1px solid var(--line); border-radius: 8px; padding: 7px 8px; background: var(--bg); color: var(--text); font-size: 13.5px; }
+.list-row .access-sel { margin-right: 6px; }
+
 /* ---------- Goals form ---------- */
 .goal-table { display: grid; grid-template-columns: minmax(110px, auto) 1.4fr 1fr; gap: 10px 10px; align-items: center; margin-bottom: 6px; }
 .g-head { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); padding-left: 2px; }

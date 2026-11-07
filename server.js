@@ -66,6 +66,10 @@ const storage = (() => {
 })();
 if (storage.warning) console.warn('WARNING: ' + storage.warning);
 db.botTokens = db.botTokens || {};
+for (const rec of Object.values(db.botTokens)) {
+  const b = db.users?.[rec.userId];
+  if (b && b.isBot && !b.integration && !b.access) { b.access = 'full'; b.isAdmin = true; }
+}
 db.goals = db.goals || {};   // { [year]: { [userId]: { goalGci, goalDeals, closedGci, closedDeals, pendingGci, pendingDeals } } }
 db.urgent = db.urgent || []; // custom urgent items added by the team
 db.settings = db.settings || {}; // admin settings: inviteCode, workspaceName, logo, showName
@@ -516,7 +520,7 @@ function createChannel(user, { name, topic, parentId, templateId, isPrivate, mem
   const id = uid();
   // Private channels: only the people chosen (sub-channels of a private channel are private too).
   const priv = !!isPrivate || !!parent?.isPrivate;
-  const chosen = Array.isArray(memberIds) ? memberIds.filter((mid) => db.users[mid] && !db.users[mid].disabled && !db.users[mid].isBot) : null;
+  const chosen = Array.isArray(memberIds) ? memberIds.filter((mid) => db.users[mid] && !db.users[mid].disabled && !db.users[mid].integration) : null;
   let members;
   if (priv && chosen) members = [...new Set([...chosen, user.id])];
   else if (parent) members = [...new Set([...parent.members.filter((mid) => !db.users[mid]?.isBot), user.id])];
@@ -670,6 +674,8 @@ app.post('/api/logout', (req, res) => {
 
 // MCP endpoint for AI assistants (Grok, Claude, etc.), authenticated with a bot key.
 mountMcp(app, {
+  botAction: (bot, event, payload) => botAction(bot, event, payload),
+  fubPerson: (id) => integrations.getPerson(id),
   workspace: WORKSPACE_NAME,
   get db() { return db; },
   botFromKey(key) {
@@ -718,16 +724,61 @@ io.use((socket, next) => {
 function botList() {
   return Object.entries(db.botTokens).map(([hash, rec]) => {
     const u = db.users[rec.userId];
-    return u && !u.disabled ? { id: u.id, name: u.name, createdAt: rec.createdAt, lastUsed: rec.lastUsed || null, keyHint: rec.hint } : null;
+    return u && !u.disabled ? { id: u.id, name: u.name, createdAt: rec.createdAt, lastUsed: rec.lastUsed || null, keyHint: rec.hint, access: u.access || 'standard' } : null;
   }).filter(Boolean);
 }
 
-io.on('connection', (socket) => {
+// ---------- AI assistants act through the same actions as people ----------
+// Each bot gets a "virtual" connection that runs the exact same handlers the app uses,
+// so a bot can do what a person can, with the same rules. Only the actions below are open
+// to bots; owner-level settings (bot keys, sign-up code, Follow Up Boss, templates) never are.
+const BOT_ACTIONS = new Set([
+  'history', 'thread', 'search', 'today:get',
+  'message:send', 'message:edit', 'message:delete', 'message:pin', 'reaction', 'read', 'dm:open',
+  'channel:create', 'channel:join', 'channel:leave', 'channel:topic', 'channel:addMembers',
+  'channel:links', 'channel:stage',
+  'checklist:toggle', 'checklist:add', 'checklist:remove', 'checklist:apply',
+  'task:create', 'task:edit', 'task:update', 'lead:hot',
+  'urgent:add', 'urgent:done',
+  // full access only:
+  'channel:archive', 'channel:delete', 'channel:privacy', 'channel:removeMember', 'checklist:clear',
+  'goal:update', 'team:get', 'task:nudge',
+]);
+const FULL_ONLY = new Set(['channel:archive', 'channel:delete', 'channel:privacy', 'channel:removeMember', 'checklist:clear', 'goal:update', 'team:get', 'task:nudge']);
+const botSockets = new Map();
+function botSocket(bot) {
+  let s = botSockets.get(bot.id);
+  if (s) return s;
+  const handlers = {};
+  s = { virtual: true, data: { userId: bot.id }, handshake: { auth: {} }, join() {}, emit() {}, broadcast: { emit() {} }, on(ev, fn) { handlers[ev] = fn; }, handlers };
+  onConnection(s);
+  botSockets.set(bot.id, s);
+  return s;
+}
+function botAction(bot, event, payload = {}) {
+  if (!BOT_ACTIONS.has(event)) return Promise.resolve({ error: 'That action is not available to assistants.' });
+  if (FULL_ONLY.has(event) && bot.access !== 'full') return Promise.resolve({ error: 'This assistant has standard access. An admin can give it full access in Settings → AI & API.' });
+  const fn = botSocket(bot).handlers[event];
+  if (!fn) return Promise.resolve({ error: 'Unknown action.' });
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (r) => { if (!done) { done = true; resolve(r || { ok: true }); } };
+    try {
+      const out = fn(payload, finish);
+      Promise.resolve(out).then(() => setTimeout(() => finish({ ok: true }), 30), (e) => finish({ error: e.message }));
+    } catch (e) { finish({ error: e.message }); }
+  });
+}
+
+io.on('connection', onConnection);
+function onConnection(socket) {
   const me = () => db.users[socket.data.userId];
   const user = me();
-  socket.join('u:' + user.id);
-  online.set(user.id, (online.get(user.id) || 0) + 1);
-  io.emit('presence', { userId: user.id, online: true });
+  if (!socket.virtual) {
+    socket.join('u:' + user.id);
+    online.set(user.id, (online.get(user.id) || 0) + 1);
+    io.emit('presence', { userId: user.id, online: true });
+  }
 
   const ok = (cb, data = {}) => cb?.({ ok: true, ...data });
   const fail = (cb, err) => cb?.({ error: err.message || String(err) });
@@ -885,7 +936,7 @@ io.on('connection', (socket) => {
   tasks.registerSocket(socket, me);
   socket.on('templates:get', (_, cb) => cb?.({ templates: Object.values(db.checklistTemplates) }));
   socket.on('templates:save', ({ templates }, cb) => {
-    if (!me().isAdmin) return cb?.({ error: 'Admins only.' });
+    if (!me().isAdmin || me().isBot) return cb?.({ error: 'Admins only.' });
     const next = {};
     for (const t of (Array.isArray(templates) ? templates : []).slice(0, 20)) {
       const name = String(t?.name || '').trim().slice(0, 40);
@@ -902,11 +953,11 @@ io.on('connection', (socket) => {
     cb?.({ ok: true });
   });
   socket.on('settings:get', (_, cb) => {
-    if (!me().isAdmin) return cb?.({ error: 'Admins only.' });
+    if (!me().isAdmin || me().isBot) return cb?.({ error: 'Admins only.' });
     cb?.({ inviteCode: inviteCode(), envCode: !!INVITE_CODE && !db.settings.inviteCode, workspaceName: workspaceName(), showName: db.settings.showName === true });
   });
   socket.on('settings:update', (patch, cb) => {
-    if (!me().isAdmin) return cb?.({ error: 'Admins only.' });
+    if (!me().isAdmin || me().isBot) return cb?.({ error: 'Admins only.' });
     if (patch?.inviteCode !== undefined) {
       const code = String(patch.inviteCode).trim().slice(0, 40);
       if (code && code.length < 4) return cb?.({ error: 'Use at least 4 characters for the sign-up code.' });
@@ -1143,15 +1194,26 @@ io.on('connection', (socket) => {
 
   // ----- Admin: AI assistants (bots) that connect over MCP -----
   socket.on('bot:list', (_, cb) => {
-    if (!me().isAdmin) return cb?.({ error: 'Admins only.' });
+    if (!me().isAdmin || me().isBot) return cb?.({ error: 'Admins only.' });
     cb?.({ bots: botList() });
   });
-  socket.on('bot:create', ({ name }, cb) => {
-    if (!me().isAdmin) return cb?.({ error: 'Admins only.' });
+  socket.on('bot:access', ({ botId, access }, cb) => {
+    if (!me().isAdmin || me().isBot) return cb?.({ error: 'Admins only.' });
+    const u = db.users[botId];
+    if (!u?.isBot || u.integration) return cb?.({ error: 'Not found' });
+    u.access = access === 'full' ? 'full' : 'standard';
+    u.isAdmin = u.access === 'full';
+    save();
+    io.emit('user:update', publicUser(u));
+    cb?.({ ok: true });
+  });
+  socket.on('bot:create', ({ name, access }, cb) => {
+    if (!me().isAdmin || me().isBot) return cb?.({ error: 'Admins only.' });
     const clean = String(name || 'Grok').trim().slice(0, 40) || 'Grok';
     if (Object.values(db.users).some((u) => !u.disabled && u.name.toLowerCase() === clean.toLowerCase())) return cb?.({ error: 'Someone already uses that name.' });
     const id = uid();
-    db.users[id] = { id, name: clean, email: '', title: 'AI assistant', color: '#1f1f1f', isBot: true, isAdmin: false, lastRead: {}, createdAt: Date.now() };
+    const level = access === 'standard' ? 'standard' : 'full';
+    db.users[id] = { id, name: clean, email: '', title: 'AI assistant', color: '#1f1f1f', isBot: true, isAdmin: level === 'full', access: level, lastRead: {}, createdAt: Date.now() };
     const key = 'khq_' + crypto.randomBytes(24).toString('base64url');
     db.botTokens[sha256(key)] = { userId: id, createdAt: Date.now(), createdBy: me().id, hint: key.slice(0, 8) + '…' + key.slice(-4) };
     for (const c of Object.values(db.channels)) if (c.isDefault) { c.members.push(id); emitToChannel(c, 'channel:members', { channelId: c.id, members: c.members }); }
@@ -1160,7 +1222,7 @@ io.on('connection', (socket) => {
     cb?.({ bot: { id, name: clean }, key });
   });
   socket.on('bot:revoke', ({ botId }, cb) => {
-    if (!me().isAdmin) return cb?.({ error: 'Admins only.' });
+    if (!me().isAdmin || me().isBot) return cb?.({ error: 'Admins only.' });
     const u = db.users[botId];
     if (!u?.isBot) return cb?.({ error: 'Not found' });
     for (const [hash, rec] of Object.entries(db.botTokens)) if (rec.userId === botId) delete db.botTokens[hash];
@@ -1172,7 +1234,7 @@ io.on('connection', (socket) => {
 
   // ----- Admin: Follow Up Boss lead alerts -----
   const adminOnly = (fn) => async (data, cb) => {
-    if (!me().isAdmin) return cb?.({ error: 'Admins only.' });
+    if (!me().isAdmin || me().isBot) return cb?.({ error: 'Admins only.' });
     try { cb?.({ ok: true, ...(await fn(data || {})) }); } catch (e) { cb?.({ error: e.message }); }
   };
   socket.on('fub:status', adminOnly(async () => ({ status: integrations.status() })));
@@ -1206,7 +1268,7 @@ io.on('connection', (socket) => {
       io.emit('presence', { userId: user.id, online: false });
     } else online.set(user.id, n);
   });
-});
+}
 
 function flushAndExit() {
   try { if (saveTimer) { clearTimeout(saveTimer); fs.writeFileSync(DB_FILE, JSON.stringify(db)); } } catch {}
