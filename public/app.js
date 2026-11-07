@@ -237,7 +237,8 @@
     const badgeFor = (c) => (viewing(c.id) || muted(c) ? 0 : c.isDM || levelOf(c) === 'all' ? c.unread : c.mentions) || 0;
     const item = (c, { child = false, kids = [] } = {}) => {
       const isOpen = !S.collapsed.has(c.id);
-      const hidden = kids.length && !isOpen ? kids : [];
+      kids = kids.filter(Boolean).length ? kids.filter(Boolean) : kids; // [null] = only archived children (still show the caret)
+      const hidden = kids.length && !isOpen ? kids.filter(Boolean) : [];
       const unreadHere = (c.unread && c.id !== S.current && !muted(c)) || hidden.some((k) => k.unread && !muted(k));
       const cls = ['side-item', child && 'child', viewing(c.id) && 'active', unreadHere && 'unread', muted(c) && 'muted-chan', c.archived && 'archived'].filter(Boolean).join(' ');
       let icon = c.isPrivate ? '<span class="hash lock">🔒</span>' : '<span class="hash">#</span>';
@@ -249,12 +250,18 @@
       const count = badgeFor(c) + hidden.reduce((n, k) => n + badgeFor(k), 0);
       const badge = count ? `<span class="badge">${count}</span>` : '';
       const bell = muted(c) ? '<span class="mute-icon" title="Muted">🔕</span>' : '';
-      return `<li class="${cls}" data-id="${c.id}">${icon}<span class="label">${esc(channelLabel(c))}</span>${bell}${badge}${caret}</li>`;
+      const more = child && canManage(c) ? `<button class="side-more" data-more="${c.id}" aria-label="Archive or delete" title="Archive or delete">⋯</button>` : '';
+      return `<li class="${cls}" data-id="${c.id}">${icon}<span class="label">${esc(channelLabel(c))}</span>${bell}${badge}${more}${caret}</li>`;
     };
     $('#channel-list').innerHTML = tops.map((c) => {
       const kids = childrenOf(c.id);
       const open = !S.collapsed.has(c.id);
-      return item(c, { kids }) + (kids.length && open ? kids.map((k) => item(k, { child: true })).join('') : '');
+      const archivedKids = Object.values(S.channels).filter((x) => x.parentId === c.id && x.archived && x.id !== S.current).sort(byName);
+      const showArch = S.showArchived?.has(c.id);
+      const archRow = open && archivedKids.length
+        ? `<li class="side-item child arch-toggle" data-arch-toggle="${c.id}"><span class="hash sub">🗄</span><span class="label">${archivedKids.length} archived ${showArch ? '▾' : '▸'}</span></li>` + (showArch ? archivedKids.map((k) => item(k, { child: true })).join('') : '')
+        : '';
+      return item(c, { kids: kids.length ? kids : archivedKids.length ? [null] : [] }) + (open ? kids.map((k) => item(k, { child: true })).join('') + archRow : '');
     }).join('');
     $('#dm-list').innerHTML = dms.map((c) => item(c)).join('') || '<li class="side-item muted" id="dm-empty"><span class="label">Start a conversation</span></li>';
     const total = Object.values(S.channels).reduce((n, c) => n + badgeFor(c), 0);
@@ -262,6 +269,14 @@
     if (navigator.setAppBadge) (total ? navigator.setAppBadge(total) : navigator.clearAppBadge()).catch(() => {});
   }
   $('#channel-list').addEventListener('click', (e) => {
+    const more = e.target.closest('[data-more]');
+    if (more) { e.stopPropagation(); openChannel(more.dataset.more); return channelDetails(); }
+    const at = e.target.closest('[data-arch-toggle]');
+    if (at) {
+      S.showArchived = S.showArchived || new Set();
+      S.showArchived.has(at.dataset.archToggle) ? S.showArchived.delete(at.dataset.archToggle) : S.showArchived.add(at.dataset.archToggle);
+      return renderSidebar();
+    }
     const t = e.target.closest('[data-toggle]');
     if (t) {
       e.stopPropagation();
@@ -313,7 +328,16 @@
     if (!c) return;
     const input = $('#composer-input');
     input.disabled = !!c.archived;
-    input.placeholder = c.archived ? 'This channel is archived. Open channel details to unarchive it.' : c.isDM ? `Message ${channelLabel(c)}` : `Message #${channelLabel(c)}`;
+    input.placeholder = c.archived ? 'This channel is archived.' : c.isDM ? `Message ${channelLabel(c)}` : `Message #${channelLabel(c)}`;
+    let bar = document.getElementById('archived-bar');
+    if (!bar) { bar = document.createElement('div'); bar.id = 'archived-bar'; bar.className = 'archived-bar hidden'; $('#composer').before(bar); }
+    const can = canManage(c) && !c.isDefault;
+    bar.innerHTML = `<span>🗄 This channel is archived. It's hidden from the sidebar but its messages and tasks are kept.</span>${can ? '<button class="btn small-btn" id="unarchive-btn">Unarchive</button><button class="btn small-btn danger" id="arch-del-btn">Delete…</button>' : ''}`;
+    bar.classList.toggle('hidden', !c.archived);
+    if (can && c.archived) {
+      $('#unarchive-btn').onclick = () => S.socket.emit('channel:archive', { channelId: c.id, archived: false }, (r) => r.error ? toast(r.error) : toast('Channel unarchived'));
+      $('#arch-del-btn').onclick = () => deleteChannelModal(c);
+    }
   }
   function renderHeader() {
     const c = S.channels[S.current];
@@ -1923,12 +1947,14 @@
   function goalModal(userId = S.me.id) {
     const a = S.dash.agents.find((x) => x.userId === userId) || {};
     const own = userId === S.me.id;
-    const f = (key, label, prefix) => `<div class="field">${label}<div class="money-input">${prefix ? `<span>${prefix}</span>` : ''}<input data-g="${key}" inputmode="numeric" autocomplete="off" value="${a[key] ? Number(a[key]).toLocaleString('en-CA') : ''}" placeholder="0"></div></div>`;
+    const f = (key, prefix, label) => `<label class="num-input">${prefix ? `<span>${prefix}</span>` : ''}<input data-g="${key}" inputmode="numeric" autocomplete="off" aria-label="${label}" value="${a[key] ? Number(a[key]).toLocaleString('en-CA') : ''}" placeholder="0"></label>`;
+    const row = (icon, title, k) => `<div class="g-label">${icon} ${title}</div>${f(k + 'Gci', '$', `${title} GCI`)}${f(k + 'Deals', '', `${title} deals`)}`;
     modal(own ? `Your ${S.dash.year} goal` : `${S.users[userId]?.name || 'Agent'}: ${S.dash.year} goal`, `
-      <div class="goal-grid">
-        ${f('goalGci', '🎯 Goal: GCI', '$')}${f('goalDeals', '🎯 Goal: deals')}
-        ${f('closedGci', '✅ Closed so far: GCI', '$')}${f('closedDeals', '✅ Closed so far: deals')}
-        ${f('pendingGci', '⏳ Pending: GCI', '$')}${f('pendingDeals', '⏳ Pending: deals')}
+      <div class="goal-table">
+        <div></div><div class="g-head">GCI</div><div class="g-head">Deals</div>
+        ${row('🎯', 'Goal', 'goal')}
+        ${row('✅', 'Closed so far', 'closed')}
+        ${row('⏳', 'Pending', 'pending')}
       </div>
       <p class="sub">Pending = firm or conditional deals that haven't closed yet. Your forecast is closed + pending.</p>
       <p class="error" id="goal-err"></p>

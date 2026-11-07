@@ -431,6 +431,32 @@ button.tchip { cursor: pointer; } button.tchip:hover { color: var(--text); }
   .tm-nums { flex-basis: 100%; order: 3; }
 }
 
+/* ---------- Goals form ---------- */
+.goal-table { display: grid; grid-template-columns: minmax(110px, auto) 1.4fr 1fr; gap: 10px 10px; align-items: center; margin-bottom: 6px; }
+.g-head { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); padding-left: 2px; }
+.g-label { font-weight: 600; font-size: 14px; white-space: nowrap; }
+.num-input { display: flex; align-items: center; height: 44px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); padding: 0 12px; gap: 6px; cursor: text; min-width: 0; }
+.num-input:focus-within { border-color: var(--gold); box-shadow: 0 0 0 3px rgba(201,169,110,.18); }
+.num-input span { color: var(--muted); font-weight: 600; }
+.num-input input { flex: 1; min-width: 0; width: 100%; border: 0 !important; outline: none !important; box-shadow: none !important; background: transparent; padding: 0; font-size: 16px; color: var(--text); font-variant-numeric: tabular-nums; }
+@media (max-width: 760px) {
+  .goal-table { grid-template-columns: 1.4fr 1fr; gap: 6px 8px; }
+  .goal-table > div:first-child { display: none; }
+  .g-label { grid-column: 1 / -1; margin-top: 8px; }
+}
+
+/* ---------- Archive from the sidebar ---------- */
+.side-more { border: 0; background: transparent; color: inherit; opacity: 0; padding: 0 4px; font-size: 16px; line-height: 1; border-radius: 4px; margin-left: auto; }
+.side-item:hover .side-more, .side-item.active .side-more { opacity: .8; }
+.side-more:hover { opacity: 1; background: rgba(127,127,127,.2); }
+.side-item .side-more + .caret { margin-left: 0; }
+@media (hover: none) { .side-more { opacity: .55; } }
+.arch-toggle { opacity: .6; font-size: 13px; }
+.arch-toggle:hover { opacity: .9; }
+.archived-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 20px 8px; padding: 10px 12px; border-radius: 10px; background: var(--bg-soft); border: 1px dashed var(--line); font-size: 13.5px; color: var(--muted); }
+.archived-bar span { flex: 1; min-width: 200px; }
+@media (max-width: 760px) { .archived-bar { margin: 0 12px 8px; } }
+
 /* ---------- Photo cropper & delete ---------- */
 .crop-wrap { display: flex; justify-content: center; margin: 4px 0 12px; }
 .crop-stage { position: relative; overflow: hidden; border-radius: 12px; background: #111; touch-action: none; cursor: grab; user-select: none; -webkit-user-select: none; }
